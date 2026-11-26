@@ -81,11 +81,12 @@ jobs:
           test "$(dpkg-deb --field "$deb" Architecture)" = "${{ matrix.deb }}"
           contents=$(dpkg-deb --contents "$deb")
           for f in ./usr/bin/meshkeep ./usr/lib/systemd/system/meshkeep.service \
-                   ./etc/meshkeep/meshkeep.toml ./usr/share/doc/meshkeep/copyright \
+                   ./usr/share/doc/meshkeep/meshkeep.toml.example ./usr/share/doc/meshkeep/copyright \
                    ./usr/share/doc/meshkeep/changelog.Debian.gz; do
             echo "$contents" | grep -q " $f\$" || { echo "::error::$f missing from $deb"; exit 1; }
           done
-          dpkg-deb --ctrl-tarfile "$deb" | tar -xO ./conffiles | grep -qx /etc/meshkeep/meshkeep.toml
+          # The config is created by postinst, never shipped in /etc, so upgrades never prompt.
+          if echo "$contents" | grep -q " ./etc/"; then echo "::error::$deb ships files in /etc"; exit 1; fi
           mkdir -p check && dpkg-deb -x "$deb" check
           file check/usr/bin/meshkeep
           case "${{ matrix.deb }}" in

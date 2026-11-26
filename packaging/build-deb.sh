@@ -22,7 +22,9 @@ chmod 0755 "$root"
 
 install -D -m 0755 "$bin" "$root/usr/bin/meshkeep"
 install -D -m 0644 "$here/meshkeep.service" "$root/usr/lib/systemd/system/meshkeep.service"
-install -D -m 0640 "$here/meshkeep.toml" "$root/etc/meshkeep/meshkeep.toml"
+# Shipped as an example, not a conffile: postinst copies it into /etc on first install
+# and never touches it again, so upgrades never stop to ask about the config.
+install -D -m 0644 "$here/meshkeep.toml" "$root/usr/share/doc/meshkeep/meshkeep.toml.example"
 install -D -m 0644 "$here/copyright" "$root/usr/share/doc/meshkeep/copyright"
 
 date=$(date -R -u -d "@${SOURCE_DATE_EPOCH:-$(date +%s)}")
@@ -47,7 +49,6 @@ Description: storing proxy and web client for MeshCore companion radios
  every message it receives, and lets several MeshCore apps and web browsers
  use the radio at once without missing messages.
 CONTROL
-echo /etc/meshkeep/meshkeep.toml > "$root/DEBIAN/conffiles"
 
 cat > "$root/DEBIAN/postinst" <<'SCRIPT'
 #!/bin/sh
@@ -58,8 +59,10 @@ if [ "$1" = configure ]; then
       --gecos "meshkeep" meshkeep >/dev/null
   fi
   adduser meshkeep dialout >/dev/null 2>&1 || true
-  chown root:meshkeep /etc/meshkeep/meshkeep.toml
-  chmod 0640 /etc/meshkeep/meshkeep.toml
+  if [ ! -e /etc/meshkeep/meshkeep.toml ]; then
+    install -d -m 0755 /etc/meshkeep
+    install -m 0640 -o root -g meshkeep /usr/share/doc/meshkeep/meshkeep.toml.example /etc/meshkeep/meshkeep.toml
+  fi
   if [ -d /run/systemd/system ]; then
     systemctl daemon-reload >/dev/null || true
     # Restart on upgrade if it was running; a fresh install waits for configuration.
@@ -87,7 +90,7 @@ if [ -d /run/systemd/system ]; then
   systemctl daemon-reload >/dev/null || true
 fi
 if [ "$1" = purge ]; then
-  rm -rf /var/lib/meshkeep
+  rm -rf /var/lib/meshkeep /etc/meshkeep
 fi
 exit 0
 SCRIPT

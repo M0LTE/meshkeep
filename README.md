@@ -26,7 +26,7 @@ The package does not start meshkeep until you have configured it.
 
 ## Configure
 
-Edit `/etc/meshkeep/meshkeep.toml`. At minimum, say where the radio is and set a web password:
+Edit `/etc/meshkeep/meshkeep.toml`. It is created on first install and upgrades leave it alone; the current example with every option is in `/usr/share/doc/meshkeep/meshkeep.toml.example`. At minimum, say where the radio is and set a web password:
 
 ```toml
 radio = "192.168.1.50"       # WiFi companion (port 5000 assumed)
