@@ -9,7 +9,7 @@ A companion radio talks to one app at a time and only holds a handful of message
 - It looks like a WiFi companion radio to the MeshCore app, so your phone and tablet connect to meshkeep instead, at the same time, and each catches up on everything it missed.
 - It has its own web interface for reading and sending messages from any browser.
 
-Works with MeshCore companion radio firmware (tested against companion v1.18).
+Works with MeshCore companion radios, following the companion protocol as of firmware v1.18.
 
 ## Install
 
