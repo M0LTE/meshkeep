@@ -152,6 +152,9 @@ struct Cmd {
     origin: Origin,
     frame: Vec<u8>,
     enqueued_ms: u64,
+    /// The sending app's sync key, taken when the command was queued so a
+    /// disconnect before the reply does not lose it.
+    sender: Option<String>,
 }
 
 struct InFlight {
@@ -404,6 +407,7 @@ impl Hub {
             origin: Origin::Internal,
             frame,
             enqueued_ms,
+            sender: None,
         });
     }
 
@@ -493,7 +497,7 @@ impl Hub {
         if done {
             let inf = self.in_flight.take().unwrap();
             self.observe(&inf.cmd, &f, inf.listing);
-            self.deliver(&inf.cmd.origin, &inf.cmd.frame, f);
+            self.deliver(&inf.cmd, f);
         } else {
             let origin_conn = match inf.cmd.origin {
                 Origin::Client(c) => Some(c),
@@ -509,10 +513,11 @@ impl Hub {
     }
 
     /// Route a final response to whoever asked.
-    fn deliver(&mut self, origin: &Origin, cmd_frame: &[u8], f: Vec<u8>) {
-        match *origin {
+    fn deliver(&mut self, c: &Cmd, f: Vec<u8>) {
+        let cmd_frame = &c.frame[..];
+        match c.origin {
             Origin::Client(conn) => {
-                self.client_result(conn, cmd_frame, &f);
+                self.client_result(c.sender.clone(), cmd_frame, &f);
                 self.send_to(conn, f);
             }
             Origin::Web(id) => self.web_result(id, cmd_frame, &f),
@@ -552,6 +557,7 @@ impl Hub {
                                 origin: Origin::Internal,
                                 frame: vec![cmd::GET_CHANNEL, i],
                                 enqueued_ms: now,
+                                sender: None,
                             });
                         }
                     }
@@ -640,6 +646,7 @@ impl Hub {
                         origin: Origin::Internal,
                         frame: c,
                         enqueued_ms: now,
+                        sender: None,
                     });
                 }
             }
@@ -974,6 +981,7 @@ impl Hub {
             origin: Origin::Client(conn),
             frame,
             enqueued_ms,
+            sender: self.clients.get(&conn).map(|c| c.key.clone()),
         });
     }
 
@@ -1027,7 +1035,7 @@ impl Hub {
     }
 
     /// Record messages apps send through us, so the web UI shows them.
-    fn client_result(&mut self, conn: ConnId, cmd_frame: &[u8], f: &[u8]) {
+    fn client_result(&mut self, sender: Option<String>, cmd_frame: &[u8], f: &[u8]) {
         match (cmd_frame[0], f[0]) {
             (cmd::SEND_TXT_MSG, resp::SENT) => {
                 let (Some((txt_type, _attempt, ts, prefix, text)), Some((_, ack, timeout))) =
@@ -1043,8 +1051,7 @@ impl Hub {
                     // An app retry: already recorded and mirrored.
                     Some(id) => id,
                     None => {
-                        let key = self.clients.get(&conn).map(|c| c.key.clone());
-                        self.mirror(cmd_frame, key);
+                        self.mirror(cmd_frame, sender.clone());
                         let name = self.status.lock().unwrap().name.clone();
                         match self.store.insert_outbound(
                             &conv,
@@ -1075,8 +1082,7 @@ impl Hub {
                 if txt_type != p::txt::PLAIN {
                     return;
                 }
-                let key = self.clients.get(&conn).map(|c| c.key.clone());
-                self.mirror(cmd_frame, key);
+                self.mirror(cmd_frame, sender);
                 let name = self.status.lock().unwrap().name.clone();
                 let ch = self.store.channel_name(idx);
                 if let Ok(id) = self.store.insert_outbound(
@@ -1108,7 +1114,7 @@ impl Hub {
         // What the firmware puts on air: "<name>: <text>", cut to MAX_TEXT_LEN.
         let mut on_air = format!("{name}: ").into_bytes();
         let room = p::MAX_TEXT_LEN.saturating_sub(on_air.len());
-        let text = &cmd_frame[7..];
+        let text = p::until_nul(&cmd_frame[7..]);
         on_air.extend_from_slice(&text[..room.min(text.len())]);
         self.recent_sends
             .push_back((id, idx, ts, on_air, self.now()));
@@ -1163,7 +1169,7 @@ impl Hub {
                 (
                     store::conv_dm(&prefix),
                     p::MsgKind::Direct,
-                    p::mirror_dm_frame(&prefix, ts, &cmd_frame[13..]),
+                    p::mirror_dm_frame(&prefix, ts, p::until_nul(&cmd_frame[13..])),
                 )
             }
             cmd::SEND_CHANNEL_TXT_MSG => {
@@ -1177,7 +1183,7 @@ impl Hub {
                 (
                     store::conv_channel(idx),
                     p::MsgKind::Channel,
-                    p::mirror_channel_frame(idx, ts, &name, &cmd_frame[7..]),
+                    p::mirror_channel_frame(idx, ts, &name, p::until_nul(&cmd_frame[7..])),
                 )
             }
             _ => return,
@@ -1261,6 +1267,7 @@ impl Hub {
             origin: Origin::Web(id),
             frame: p::build_send_txt(&prefix, ts, 0, &text),
             enqueued_ms,
+            sender: None,
         });
         Ok(id)
     }
@@ -1299,6 +1306,7 @@ impl Hub {
             origin: Origin::Web(id),
             frame: p::build_send_channel(idx, ts, &text),
             enqueued_ms,
+            sender: None,
         });
         Ok(id)
     }

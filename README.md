@@ -78,7 +78,7 @@ Sign-in uses the single password from the config. On a network you fully trust y
 
 ## Limitations
 
-- The app has no way to be told about a message sent from another device. meshkeep works around this by showing it to the other apps as if it had been received: a channel message appears under your own node name, a DM appears in that contact's conversation as `You: ...`. Set `mirror_sent = false` to turn this off.
+- The app has no way to be told about a message sent from another device. meshkeep works around this by showing it to the other apps as if it had been received: a channel message appears from `You`, a DM appears in that contact's conversation as `You: ...`. Set `mirror_sent = false` to turn this off.
 - A message that was being handed to an app at the moment its connection dropped is delivered again next time, so a rare duplicate is possible. Nothing is lost.
 - Two devices sharing one listener (without `per_address`) share one place in the history, so each sees only some of the messages. Use one listener per device.
 - A device first seen on a `per_address` listener gets at most the 100 most recent messages from before it connected.

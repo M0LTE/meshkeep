@@ -700,11 +700,20 @@ fn fit_text(head_len: usize, text: &[u8]) -> &[u8] {
     }
 }
 
-/// A sent channel message dressed as a received one (v3 layout), with the
-/// text the firmware puts on air: `<node name>: <text>`, cut to `MAX_TEXT_LEN`.
+/// Text up to the first NUL. Apps may end their send frames with one.
+pub fn until_nul(b: &[u8]) -> &[u8] {
+    b.iter().position(|&c| c == 0).map_or(b, |i| &b[..i])
+}
+
+/// A sent channel message dressed as a received one (v3 layout), from
+/// `You`: apps drop channel messages that carry their own node name and no
+/// path as echoes of their own sends. The text is cut where the firmware cut
+/// it on air, after `<node name>: `.
 pub fn mirror_channel_frame(idx: u8, ts: u32, node_name: &str, text: &[u8]) -> Vec<u8> {
-    let mut body = format!("{node_name}: ").into_bytes();
-    let room = MAX_TEXT_LEN.saturating_sub(body.len()).min(text.len());
+    let room = MAX_TEXT_LEN
+        .saturating_sub(node_name.len() + 2)
+        .min(text.len());
+    let mut body = b"You: ".to_vec();
     body.extend_from_slice(&text[..room]);
     let mut f = vec![
         resp::CHANNEL_MSG_RECV_V3,
@@ -782,7 +791,7 @@ pub fn parse_send_txt_cmd(f: &[u8]) -> Option<(u8, u8, u32, [u8; 6], String)> {
         f[2],
         u32le(f, 3),
         p,
-        String::from_utf8_lossy(&f[13..]).into_owned(),
+        String::from_utf8_lossy(until_nul(&f[13..])).into_owned(),
     ))
 }
 
@@ -795,7 +804,7 @@ pub fn parse_send_channel_cmd(f: &[u8]) -> Option<(u8, u8, u32, String)> {
         f[1],
         f[2],
         u32le(f, 3),
-        String::from_utf8_lossy(&f[7..]).into_owned(),
+        String::from_utf8_lossy(until_nul(&f[7..])).into_owned(),
     ))
 }
 
@@ -930,8 +939,19 @@ mod tests {
         let m = parse_inbound(&c).unwrap();
         assert_eq!(
             (m.channel, m.text.as_str(), m.sender_ts),
-            (Some(2), "Node: hi", 9)
+            (Some(2), "You: hi", 9)
         );
+    }
+
+    #[test]
+    fn channel_mirror_cut_as_on_air() {
+        // 160 bytes less "Node: ".
+        let c = mirror_channel_frame(2, 9, "Node", &[b'x'; 200]);
+        assert_eq!(parse_inbound(&c).unwrap().text.len(), 5 + 160 - 6);
+        assert_eq!(until_nul(b"abc\0\0"), b"abc");
+        let mut cmd = build_send_channel(1, 2, "hi");
+        cmd.push(0);
+        assert_eq!(parse_send_channel_cmd(&cmd).unwrap().3, "hi");
     }
 
     #[test]

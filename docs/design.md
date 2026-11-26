@@ -110,8 +110,10 @@ Limits follow the firmware: 160 bytes of text for a DM; for a channel, 160 minus
 
 The companion protocol has no frame for "a message was sent from somewhere else", so a message sent from the web or from one app never shows up in the other apps. With `mirror_sent` on (the default), meshkeep fakes it: once the radio has accepted a plain text send (`RESP_CODE_SENT` for a DM, `RESP_CODE_OK` for a channel), it stores a mirror frame that goes out through the normal sync path to every client except the one that sent it (the web is never a sync client, so a web send reaches all apps).
 
-- Channel message: a received channel message on that channel index, with the text the firmware actually puts on air, `<own node name>: <text>` (cut to 160 bytes as the firmware does), so the app shows it under your own name.
+- Channel message: a received channel message on that channel index from `You`, text `You: <text>`. Apps (meshcore-open certainly) drop a channel message that carries their own node name and no path as an echo of their own send, so the real name would make the mirror vanish. The text is cut where the firmware cut it on air (160 bytes less `<node name>: `).
 - DM to contact X: a received DM from X's key prefix with the text `You: <text>`. The app files it in X's conversation as if X had written it; the prefix makes clear it is yours.
+- A trailing NUL that some apps put at the end of the send frame is dropped.
+- The copy is tied to the sending app's sync key when the command is queued, so an app that disconnects before the radio answers still never gets its own copy.
 - Timestamp is the one in the send command, SNR 0, `path_len` 0xFF (the firmware's value for a message that was not flooded, shown as direct).
 - Layout follows each app's announced version (v3 or legacy), as for received messages.
 - Only plain text is mirrored: not CLI or command text, signed, raw or binary sends, and not refused sends. An app retry of the same DM is not mirrored twice.

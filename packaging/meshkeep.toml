@@ -8,7 +8,7 @@
 #radio = "/dev/ttyACM0"
 
 # Show messages sent from the web or one app in the other apps, as if
-# received (DMs read "You: ..."). On by default.
+# received, from "You". On by default.
 #mirror_sent = false
 
 # Where messages are stored. The packaged service passes /var/lib/meshkeep.

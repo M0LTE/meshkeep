@@ -60,7 +60,7 @@ async fn web_sends_reach_every_app() {
         let mut app = rig.app(i).await;
         app.handshake(3).await;
         let got = app.sync_all().await;
-        assert_eq!(texts(&got), ["You: on my way", "SimNode: leaving now"]);
+        assert_eq!(texts(&got), ["You: on my way", "You: leaving now"]);
         let dm = p::parse_inbound(&got[0]).unwrap();
         assert_eq!(got[0][0], resp::CONTACT_MSG_RECV_V3);
         assert_eq!(dm.prefix, Some(alice));
@@ -104,7 +104,7 @@ async fn app_sends_reach_other_apps_only() {
     assert_eq!(phone.request(&ch).await, vec![resp::OK]);
 
     let got = tablet.sync_all().await;
-    assert_eq!(texts(&got), ["You: see you there", "SimNode: parked"]);
+    assert_eq!(texts(&got), ["You: see you there", "You: parked"]);
     assert_eq!(p::parse_inbound(&got[0]).unwrap().sender_ts, 4242);
     assert!(phone.sync_all().await.is_empty());
 
@@ -127,7 +127,7 @@ async fn legacy_apps_get_legacy_mirrors() {
     let got = tablet.sync_all().await;
     assert_eq!(got[0][0], resp::CONTACT_MSG_RECV);
     assert_eq!(got[1][0], resp::CHANNEL_MSG_RECV);
-    assert_eq!(texts(&got), ["You: hi", "SimNode: all"]);
+    assert_eq!(texts(&got), ["You: hi", "You: all"]);
 }
 
 #[tokio::test]
@@ -165,4 +165,53 @@ async fn mirroring_can_be_turned_off() {
     assert!(tablet.sync_all().await.is_empty());
     assert!(phone.sync_all().await.is_empty());
     let _ = cmd::SYNC_NEXT_MESSAGE;
+}
+
+#[tokio::test]
+async fn sender_that_left_before_the_reply_still_gets_no_mirror() {
+    let mut rig = Rig::start().await;
+    let mut phone = rig.app(0).await;
+    phone.handshake(3).await;
+    rig.sim.set_hold(true);
+    phone
+        .send(&p::build_send_txt(&rig.bob.prefix(), 77, 0, "gone"))
+        .await;
+    guard(rig.sim.wait_until(|s| s.held() == 1)).await;
+    drop(phone);
+    rig.wait_event(|e| matches!(e, Event::Apps)).await;
+    rig.sim.set_hold(false);
+    rig.sim.release();
+    status(&mut rig, "sent").await;
+    let mut phone = rig.app(0).await;
+    assert!(phone.sync_all().await.is_empty());
+    let mut tablet = rig.app(1).await;
+    assert_eq!(texts(&tablet.sync_all().await), ["You: gone"]);
+}
+
+#[tokio::test]
+async fn trailing_nul_from_apps_is_dropped() {
+    let mut rig = Rig::start().await;
+    let mut phone = rig.app(0).await;
+    phone.handshake(3).await;
+    let mut dm = p::build_send_txt(&rig.bob.prefix(), 88, 0, "dm text");
+    dm.push(0);
+    assert_eq!(phone.request(&dm).await[0], resp::SENT);
+    let mut ch = p::build_send_channel(1, 89, "channel text");
+    ch.push(0);
+    assert_eq!(phone.request(&ch).await, vec![resp::OK]);
+    let mut tablet = rig.app(1).await;
+    let got = tablet.sync_all().await;
+    assert_eq!(texts(&got), ["You: dm text", "You: channel text"]);
+    assert!(!got[0][16..].contains(&0));
+    assert!(!got[1][11..].contains(&0));
+    // Recorded without the NUL, and repeats still match it.
+    assert_eq!(
+        rig.mk.store.messages("ch:1", None, 1)[0].text,
+        "channel text"
+    );
+    rig.sim.echo_last_channel_send(&[0x33]);
+    let e = rig
+        .wait_event(|e| matches!(e, Event::MessageHeard { .. }))
+        .await;
+    assert!(matches!(e, Event::MessageHeard { heard: 1, .. }));
 }
