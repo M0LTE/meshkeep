@@ -1,0 +1,31 @@
+# meshkeep configuration. See https://github.com/packet-net/meshkeep
+# Restart after changes: sudo systemctl restart meshkeep
+
+# The companion radio: host or host:port for a WiFi companion (port 5000 by
+# default), or a serial device for a USB companion.
+#radio = "192.168.1.50:5000"
+#radio = "/dev/ttyACM0"
+
+# Where messages are stored. The packaged service passes /var/lib/meshkeep.
+#data_dir = "/var/lib/meshkeep"
+
+# Apps connect here as if to a WiFi companion radio. Each listener keeps its
+# own place in the message history, so give each device its own listener.
+[[listener]]
+name = "phone"
+bind = "0.0.0.0:5000"
+
+#[[listener]]
+#name = "tablet"
+#bind = "0.0.0.0:5001"
+
+# Set per_address = true to track each connecting IP address separately
+# instead of one position for the whole listener.
+#per_address = true
+
+[web]
+bind = "0.0.0.0:8080"
+# Required unless auth = false.
+#password = "change me"
+# Turn off sign-in, for trusted networks only.
+#auth = false

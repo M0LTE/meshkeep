@@ -144,3 +144,4 @@ body.login { display: grid; place-items: center; overflow: auto; }
 .login-card input { padding: 10px 12px; border-radius: 10px; border: 1px solid var(--line); background: var(--bg); }
 .login-card button { margin-top: 6px; padding: 10px; }
 .error { color: var(--bad); margin: 0; font-size: 14px; text-align: center; }
+.count:empty { display: none; }

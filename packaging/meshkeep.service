@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+[Unit]
+Description=meshkeep, storing proxy and web client for a MeshCore companion radio
+Documentation=https://github.com/packet-net/meshkeep
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=meshkeep
+Group=meshkeep
+# dialout gives access to USB serial radios.
+SupplementaryGroups=dialout
+StateDirectory=meshkeep
+ExecStart=/usr/bin/meshkeep --config /etc/meshkeep/meshkeep.toml --data-dir /var/lib/meshkeep
+Restart=on-failure
+# Exit status 2 is a configuration error: do not loop on it.
+RestartPreventExitStatus=2
+RestartSec=10
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

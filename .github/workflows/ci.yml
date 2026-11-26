@@ -1,0 +1,139 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+name: ci
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+
+  build:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            deb: amd64
+          - target: aarch64-unknown-linux-musl
+            deb: arm64
+          - target: armv7-unknown-linux-musleabihf
+            deb: armhf
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Install cargo-zigbuild
+        run: pip3 install --user cargo-zigbuild
+      - id: v
+        name: Version from tag
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          crate=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "$version" != "$crate" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $crate"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Build
+        run: cargo zigbuild --release --locked --target ${{ matrix.target }}
+      - name: Package
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          bin=target/${{ matrix.target }}/release/meshkeep
+          mkdir -p dist
+          cp "$bin" "dist/meshkeep-$VERSION-${{ matrix.target }}"
+          SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) packaging/build-deb.sh ${{ matrix.deb }} "$bin" "$VERSION" dist
+      - name: Verify package
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          deb="dist/meshkeep_${VERSION}_${{ matrix.deb }}.deb"
+          dpkg-deb --info "$deb"
+          dpkg-deb --contents "$deb"
+          test "$(dpkg-deb --field "$deb" Package)" = meshkeep
+          test "$(dpkg-deb --field "$deb" Version)" = "$VERSION"
+          test "$(dpkg-deb --field "$deb" Architecture)" = "${{ matrix.deb }}"
+          contents=$(dpkg-deb --contents "$deb")
+          for f in ./usr/bin/meshkeep ./usr/lib/systemd/system/meshkeep.service \
+                   ./etc/meshkeep/meshkeep.toml ./usr/share/doc/meshkeep/copyright \
+                   ./usr/share/doc/meshkeep/changelog.Debian.gz; do
+            echo "$contents" | grep -q " $f\$" || { echo "::error::$f missing from $deb"; exit 1; }
+          done
+          dpkg-deb --ctrl-tarfile "$deb" | tar -xO ./conffiles | grep -qx /etc/meshkeep/meshkeep.toml
+          mkdir -p check && dpkg-deb -x "$deb" check
+          file check/usr/bin/meshkeep
+          case "${{ matrix.deb }}" in
+            amd64) want="x86-64" ;;
+            arm64) want="aarch64" ;;
+            armhf) want="ARM, EABI5" ;;
+          esac
+          file check/usr/bin/meshkeep | grep -q "$want" || { echo "::error::binary is not $want"; exit 1; }
+          file check/usr/bin/meshkeep | grep -q "statically linked" || { echo "::error::binary is not static"; exit 1; }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.deb }}
+          path: dist/*
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      APT_DISPATCH_TOKEN: ${{ secrets.APT_DISPATCH_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: v
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          (cd dist && sha256sum * > SHA256SUMS)
+          gh release create "v$VERSION" dist/* --title "meshkeep $VERSION" --generate-notes --verify-tag
+      - name: Tell the apt repo to rebuild
+        if: env.APT_DISPATCH_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ secrets.APT_DISPATCH_TOKEN }}
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          payload=$(printf '{"event_type":"release-published","client_payload":{"repo":"%s","tag":"v%s"}}' "$GITHUB_REPOSITORY" "$VERSION")
+          if printf '%s' "$payload" | gh api -X POST repos/packet-net/apt/dispatches --input -; then
+            echo "apt repo rebuild triggered."
+          else
+            echo "::warning::could not trigger the packet-net/apt rebuild; its cron will pick this release up."
+          fi
+      - name: Warn if APT_DISPATCH_TOKEN missing
+        if: env.APT_DISPATCH_TOKEN == ''
+        run: echo "::warning::APT_DISPATCH_TOKEN is not set; the apt repo cron will pick this release up."
