@@ -74,7 +74,10 @@ pub async fn run(
                 if heard {
                     backoff = BACKOFF_MIN;
                 }
-                warn!("radio at {addr} disconnected, reconnecting in {}s", backoff.as_secs());
+                warn!(
+                    "radio at {addr} disconnected, reconnecting in {}s",
+                    backoff.as_secs()
+                );
             }
             Err(e) => {
                 if !failing {

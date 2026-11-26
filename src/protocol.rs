@@ -251,8 +251,13 @@ pub fn expect_for(frame: &[u8]) -> Expect {
     const OKS: &[u8] = &[r::OK];
     match code {
         APP_START => Expect::One(&[r::SELF_INFO]),
-        SEND_TXT_MSG | SEND_LOGIN | SEND_STATUS_REQ | SEND_TRACE_PATH | SEND_BINARY_REQ
-        | SEND_PATH_DISCOVERY_REQ | SEND_ANON_REQ => Expect::One(&[r::SENT]),
+        SEND_TXT_MSG
+        | SEND_LOGIN
+        | SEND_STATUS_REQ
+        | SEND_TRACE_PATH
+        | SEND_BINARY_REQ
+        | SEND_PATH_DISCOVERY_REQ
+        | SEND_ANON_REQ => Expect::One(&[r::SENT]),
         GET_CONTACTS => Expect::Contacts,
         GET_DEVICE_TIME => Expect::One(&[r::CURR_TIME]),
         SYNC_NEXT_MESSAGE => Expect::SyncNext,
@@ -277,13 +282,34 @@ pub fn expect_for(frame: &[u8]) -> Expect {
         GET_ALLOWED_REPEAT_FREQ => Expect::One(&[r::ALLOWED_REPEAT_FREQ]),
         GET_DEFAULT_FLOOD_SCOPE => Expect::One(&[r::DEFAULT_FLOOD_SCOPE]),
         RUN_CLI_COMMAND => Expect::One(&[r::CLI_REPLY]),
-        SEND_CHANNEL_TXT_MSG | SET_DEVICE_TIME | SEND_SELF_ADVERT | SET_ADVERT_NAME
-        | ADD_UPDATE_CONTACT | SET_RADIO_PARAMS | SET_RADIO_TX_POWER | RESET_PATH
-        | SET_ADVERT_LATLON | REMOVE_CONTACT | SHARE_CONTACT | IMPORT_CONTACT
-        | SET_TUNING_PARAMS | SEND_RAW_DATA | HAS_CONNECTION | LOGOUT | SET_CHANNEL
-        | SIGN_DATA | SET_DEVICE_PIN | SET_OTHER_PARAMS | SET_CUSTOM_VAR | SET_FLOOD_SCOPE_KEY
-        | SEND_CONTROL_DATA | SET_AUTOADD_CONFIG | SET_PATH_HASH_MODE | SEND_CHANNEL_DATA
-        | SET_DEFAULT_FLOOD_SCOPE | SEND_RAW_PACKET => Expect::One(OKS),
+        SEND_CHANNEL_TXT_MSG
+        | SET_DEVICE_TIME
+        | SEND_SELF_ADVERT
+        | SET_ADVERT_NAME
+        | ADD_UPDATE_CONTACT
+        | SET_RADIO_PARAMS
+        | SET_RADIO_TX_POWER
+        | RESET_PATH
+        | SET_ADVERT_LATLON
+        | REMOVE_CONTACT
+        | SHARE_CONTACT
+        | IMPORT_CONTACT
+        | SET_TUNING_PARAMS
+        | SEND_RAW_DATA
+        | HAS_CONNECTION
+        | LOGOUT
+        | SET_CHANNEL
+        | SIGN_DATA
+        | SET_DEVICE_PIN
+        | SET_OTHER_PARAMS
+        | SET_CUSTOM_VAR
+        | SET_FLOOD_SCOPE_KEY
+        | SEND_CONTROL_DATA
+        | SET_AUTOADD_CONFIG
+        | SET_PATH_HASH_MODE
+        | SEND_CHANNEL_DATA
+        | SET_DEFAULT_FLOOD_SCOPE
+        | SEND_RAW_PACKET => Expect::One(OKS),
         // A malformed reboot/reset falls through to the firmware's final
         // `else`, which answers ERR_CODE_UNSUPPORTED_CMD.
         REBOOT | FACTORY_RESET => Expect::One(&[]),
@@ -729,7 +755,20 @@ mod tests {
 
     #[test]
     fn signed_dm_skips_prefix() {
-        let mut f = vec![resp::CONTACT_MSG_RECV_V3, 8, 0, 0, 1, 2, 3, 4, 5, 6, 2, txt::SIGNED_PLAIN];
+        let mut f = vec![
+            resp::CONTACT_MSG_RECV_V3,
+            8,
+            0,
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            2,
+            txt::SIGNED_PLAIN,
+        ];
         f.extend_from_slice(&9u32.to_le_bytes());
         f.extend_from_slice(&[0xaa; 4]);
         f.extend_from_slice(b"yo");
@@ -740,9 +779,15 @@ mod tests {
 
     #[test]
     fn expectations() {
-        assert_eq!(expect_for(&[cmd::REBOOT, b'r', b'e', b'b', b'o', b'o', b't']), Expect::Nothing);
+        assert_eq!(
+            expect_for(&[cmd::REBOOT, b'r', b'e', b'b', b'o', b'o', b't']),
+            Expect::Nothing
+        );
         assert_eq!(expect_for(&[cmd::GET_CONTACTS]), Expect::Contacts);
-        assert_eq!(expect_for(&[cmd::SEND_TELEMETRY_REQ, 0, 0, 0]), Expect::SelfTelemetry);
+        assert_eq!(
+            expect_for(&[cmd::SEND_TELEMETRY_REQ, 0, 0, 0]),
+            Expect::SelfTelemetry
+        );
         assert_eq!(expect_for(&[200]), Expect::AnyOne);
     }
 }

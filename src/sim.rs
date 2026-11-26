@@ -460,7 +460,11 @@ fn handle(st: &mut SimState, c: &[u8]) -> Vec<Vec<u8>> {
             out
         }
         cmd::GET_CONTACT_BY_KEY => {
-            match st.contacts.iter().find(|ct| len > 32 && ct.pubkey[..] == c[1..33]) {
+            match st
+                .contacts
+                .iter()
+                .find(|ct| len > 32 && ct.pubkey[..] == c[1..33])
+            {
                 Some(ct) => vec![ct.frame(resp::CONTACT)],
                 None => e(err::NOT_FOUND),
             }
@@ -492,7 +496,10 @@ fn handle(st: &mut SimState, c: &[u8]) -> Vec<Vec<u8>> {
             let ack = st.next_ack;
             st.next_ack += 1;
             st.acks.push(ack);
-            st.sent.push((prefix.to_vec(), String::from_utf8_lossy(&c[13..]).into_owned()));
+            st.sent.push((
+                prefix.to_vec(),
+                String::from_utf8_lossy(&c[13..]).into_owned(),
+            ));
             let mut f = vec![resp::SENT, 1];
             f.extend_from_slice(&ack.to_le_bytes());
             f.extend_from_slice(&8000u32.to_le_bytes());
@@ -515,7 +522,8 @@ fn handle(st: &mut SimState, c: &[u8]) -> Vec<Vec<u8>> {
         cmd::SEND_SELF_ADVERT => ok(),
         cmd::REMOVE_CONTACT => {
             let before = st.contacts.len();
-            st.contacts.retain(|ct| !(len > 32 && ct.pubkey[..] == c[1..33]));
+            st.contacts
+                .retain(|ct| !(len > 32 && ct.pubkey[..] == c[1..33]));
             if st.contacts.len() < before {
                 ok()
             } else {

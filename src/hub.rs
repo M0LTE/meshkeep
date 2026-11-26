@@ -78,9 +78,16 @@ pub enum HubMsg {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Event {
-    Radio { connected: bool },
-    Message { message: Message },
-    MessageStatus { id: i64, status: String },
+    Radio {
+        connected: bool,
+    },
+    Message {
+        message: Message,
+    },
+    MessageStatus {
+        id: i64,
+        status: String,
+    },
     Contacts,
     Channels,
     SelfInfo,
@@ -448,9 +455,16 @@ impl Hub {
                         st.model = Some(di.model);
                         st.firmware = Some(di.version);
                     }
-                    if matches!(c.origin, Origin::Internal) {
-                        for i in 0..di.max_channels {
-                            self.internal(vec![cmd::GET_CHANNEL, i]);
+                    // Channel names are needed before the first drain stores
+                    // channel messages, so these jump the internal queue.
+                    if matches!(c.origin, Origin::Internal) && self.radio.is_some() {
+                        let now = self.now();
+                        for i in (0..di.max_channels).rev() {
+                            self.internal_q.push_front(Cmd {
+                                origin: Origin::Internal,
+                                frame: vec![cmd::GET_CHANNEL, i],
+                                enqueued_ms: now,
+                            });
                         }
                     }
                 }
@@ -584,8 +598,8 @@ impl Hub {
 
     fn pump(&mut self) {
         while self.in_flight.is_none() {
-            let use_internal = !self.internal_q.is_empty()
-                && (self.client_q.is_empty() || !self.last_internal);
+            let use_internal =
+                !self.internal_q.is_empty() && (self.client_q.is_empty() || !self.last_internal);
             let c = if use_internal {
                 self.internal_q.pop_front()
             } else {
@@ -743,7 +757,10 @@ impl Hub {
             return;
         };
         if c.tx.try_send(f).is_err() {
-            warn!("app {} at {} is not reading, disconnecting it", c.key, c.peer);
+            warn!(
+                "app {} at {} is not reading, disconnecting it",
+                c.key, c.peer
+            );
             self.client_down(conn);
         }
     }
@@ -934,7 +951,10 @@ impl Hub {
             return Err("Message is empty".into());
         }
         if text.len() > p::MAX_TEXT_LEN {
-            return Err(format!("Message is too long, {} bytes at most", p::MAX_TEXT_LEN));
+            return Err(format!(
+                "Message is too long, {} bytes at most",
+                p::MAX_TEXT_LEN
+            ));
         }
         let ts = self.clock.now_unix() as u32;
         let name = self.status.lock().unwrap().name.clone();

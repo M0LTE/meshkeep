@@ -11,7 +11,9 @@ use tracing::warn;
 
 use crate::config::Listener;
 use crate::hub::{CLIENT_QUEUE, HubMsg};
-use crate::protocol::{FRAME_FROM_RADIO, FRAME_TO_RADIO, FrameDecoder, MAX_FRAME_SIZE, encode_frame};
+use crate::protocol::{
+    FRAME_FROM_RADIO, FRAME_TO_RADIO, FrameDecoder, MAX_FRAME_SIZE, encode_frame,
+};
 
 static NEXT_CONN: AtomicU64 = AtomicU64::new(1);
 
@@ -52,7 +54,11 @@ async fn connection(
     let (mut rd, mut wr) = sock.into_split();
     let writer = tokio::spawn(async move {
         while let Some(f) = rx.recv().await {
-            if wr.write_all(&encode_frame(FRAME_FROM_RADIO, &f)).await.is_err() {
+            if wr
+                .write_all(&encode_frame(FRAME_FROM_RADIO, &f))
+                .await
+                .is_err()
+            {
                 break;
             }
         }

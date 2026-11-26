@@ -160,7 +160,9 @@ impl Store {
 
     pub fn max_message_id(&self) -> i64 {
         self.db()
-            .query_row("SELECT COALESCE(MAX(id), 0) FROM messages", [], |r| r.get(0))
+            .query_row("SELECT COALESCE(MAX(id), 0) FROM messages", [], |r| {
+                r.get(0)
+            })
             .unwrap_or(0)
     }
 
@@ -455,7 +457,9 @@ impl Store {
     pub fn contacts(&self) -> Vec<ContactRow> {
         let db = self.db();
         let mut st = db
-            .prepare("SELECT pubkey, name, kind, last_advert FROM contacts ORDER BY name COLLATE NOCASE")
+            .prepare(
+                "SELECT pubkey, name, kind, last_advert FROM contacts ORDER BY name COLLATE NOCASE",
+            )
             .expect("prepare");
         st.query_map([], |r| {
             let pk: Vec<u8> = r.get(0)?;
@@ -476,7 +480,9 @@ impl Store {
         let db = self.db();
         let mut st = db.prepare("SELECT pubkey, name FROM contacts").ok()?;
         let rows = st
-            .query_map([], |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?)))
+            .query_map([], |r| {
+                Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, String>(1)?))
+            })
             .ok()?;
         rows.filter_map(Result::ok)
             .find(|(pk, _)| pk.len() >= 6 && pk[..6] == prefix[..6])
@@ -587,7 +593,20 @@ mod tests {
     use crate::protocol::resp;
 
     fn dm(text: &str) -> InboundMessage {
-        let mut f = vec![resp::CONTACT_MSG_RECV_V3, 4, 0, 0, 1, 2, 3, 4, 5, 6, 0xff, 0];
+        let mut f = vec![
+            resp::CONTACT_MSG_RECV_V3,
+            4,
+            0,
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            0xff,
+            0,
+        ];
         f.extend_from_slice(&5u32.to_le_bytes());
         f.extend_from_slice(text.as_bytes());
         protocol::parse_inbound(&f).unwrap()
@@ -608,8 +627,17 @@ mod tests {
     fn next_for_app_skips_outbound() {
         let s = Store::open_in_memory().unwrap();
         let a = s.insert_inbound(&dm("one"), 1, None).unwrap();
-        s.insert_outbound("dm:010203040506", MsgKind::Direct, 2, 2, None, "out", "sent", None)
-            .unwrap();
+        s.insert_outbound(
+            "dm:010203040506",
+            MsgKind::Direct,
+            2,
+            2,
+            None,
+            "out",
+            "sent",
+            None,
+        )
+        .unwrap();
         let c = s.insert_inbound(&dm("two"), 3, None).unwrap();
         assert_eq!(s.next_for_app(0).unwrap().0, a);
         assert_eq!(s.next_for_app(a).unwrap().0, c);

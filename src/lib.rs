@@ -54,8 +54,12 @@ impl Drop for Running {
 /// Open the store, bind every socket and start all tasks.
 pub async fn start(cfg: Config, clock: SharedClock) -> Result<Running, String> {
     let radio = cfg.radio.clone().ok_or("no radio configured")?;
-    std::fs::create_dir_all(&cfg.data_dir)
-        .map_err(|e| format!("cannot create data directory {}: {e}", cfg.data_dir.display()))?;
+    std::fs::create_dir_all(&cfg.data_dir).map_err(|e| {
+        format!(
+            "cannot create data directory {}: {e}",
+            cfg.data_dir.display()
+        )
+    })?;
     let db = cfg.data_dir.join("meshkeep.db");
     let store =
         Store::open(&db).map_err(|e| format!("cannot open database {}: {e}", db.display()))?;
@@ -72,7 +76,10 @@ pub async fn start(cfg: Config, clock: SharedClock) -> Result<Running, String> {
         radio_addr: radio.to_string(),
         ..Default::default()
     }));
-    if let Some(si) = store.get_kv("self_info").and_then(|f| protocol::parse_self_info(&f)) {
+    if let Some(si) = store
+        .get_kv("self_info")
+        .and_then(|f| protocol::parse_self_info(&f))
+    {
         let mut st = status.lock().unwrap();
         st.name = Some(si.name);
         st.pubkey = Some(protocol::hex(&si.pubkey));

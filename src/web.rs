@@ -44,8 +44,14 @@ pub fn router(state: WebState) -> Router {
         .route("/", get(index))
         .route("/login", get(login_page).post(login))
         .route("/logout", post(logout))
-        .route("/app.js", get(|| asset("text/javascript; charset=utf-8", APP_JS)))
-        .route("/style.css", get(|| asset("text/css; charset=utf-8", STYLE_CSS)))
+        .route(
+            "/app.js",
+            get(|| asset("text/javascript; charset=utf-8", APP_JS)),
+        )
+        .route(
+            "/style.css",
+            get(|| asset("text/css; charset=utf-8", STYLE_CSS)),
+        )
         .route("/icon.svg", get(|| asset("image/svg+xml", ICON_SVG)))
         .route("/api/state", get(api_state))
         .route("/api/messages", get(api_messages))
@@ -80,8 +86,10 @@ fn authed(s: &WebState, headers: &HeaderMap) -> bool {
     if s.password.is_none() {
         return true;
     }
-    cookie_token(headers)
-        .is_some_and(|t| s.store.session_valid(&t, s.clock.now_unix(), SESSION_MAX_AGE))
+    cookie_token(headers).is_some_and(|t| {
+        s.store
+            .session_valid(&t, s.clock.now_unix(), SESSION_MAX_AGE)
+    })
 }
 
 fn unauthorized() -> Response {
@@ -147,9 +155,8 @@ async fn login(State(s): State<WebState>, Form(f): Form<LoginForm>) -> Response 
     s.store.prune_sessions(now, SESSION_MAX_AGE);
     let token = new_token();
     s.store.add_session(&token, now);
-    let cookie = format!(
-        "{COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SESSION_MAX_AGE}"
-    );
+    let cookie =
+        format!("{COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={SESSION_MAX_AGE}");
     let mut r = Redirect::to("/").into_response();
     r.headers_mut()
         .insert(header::SET_COOKIE, HeaderValue::from_str(&cookie).unwrap());

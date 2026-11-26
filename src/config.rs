@@ -125,9 +125,8 @@ impl Config {
             Some(p) => {
                 let text = std::fs::read_to_string(p)
                     .map_err(|e| format!("cannot read {}: {e}", p.display()))?;
-                toml::from_str(&text).map_err(|e| {
-                    format!("{}: {}", p.display(), e.to_string().replace('\n', " "))
-                })?
+                toml::from_str(&text)
+                    .map_err(|e| format!("{}: {}", p.display(), e.to_string().replace('\n', " ")))?
             }
             None => FileConfig::default(),
         };
@@ -162,7 +161,10 @@ impl Config {
         let mut seen = std::collections::HashSet::new();
         for l in &listeners {
             if l.name.is_empty() || l.name.contains('@') {
-                return Err(format!("listener name '{}' must be non-empty and contain no '@'", l.name));
+                return Err(format!(
+                    "listener name '{}' must be non-empty and contain no '@'",
+                    l.name
+                ));
             }
             if !seen.insert(l.name.clone()) {
                 return Err(format!("listener name '{}' is used twice", l.name));
@@ -197,7 +199,8 @@ impl Config {
         }
         if self.web_bind.is_some() && self.auth && self.password.is_none() {
             return Err(
-                "web password not set: set [web] password, or auth = false for a trusted network".into(),
+                "web password not set: set [web] password, or auth = false for a trusted network"
+                    .into(),
             );
         }
         Ok(())
@@ -210,9 +213,18 @@ mod tests {
 
     #[test]
     fn radio_addr_forms() {
-        assert_eq!(RadioAddr::parse("/dev/ttyACM0").unwrap(), RadioAddr::Serial("/dev/ttyACM0".into()));
-        assert_eq!(RadioAddr::parse("10.0.0.5").unwrap(), RadioAddr::Tcp("10.0.0.5:5000".into()));
-        assert_eq!(RadioAddr::parse("radio.lan:5001").unwrap(), RadioAddr::Tcp("radio.lan:5001".into()));
+        assert_eq!(
+            RadioAddr::parse("/dev/ttyACM0").unwrap(),
+            RadioAddr::Serial("/dev/ttyACM0".into())
+        );
+        assert_eq!(
+            RadioAddr::parse("10.0.0.5").unwrap(),
+            RadioAddr::Tcp("10.0.0.5:5000".into())
+        );
+        assert_eq!(
+            RadioAddr::parse("radio.lan:5001").unwrap(),
+            RadioAddr::Tcp("radio.lan:5001".into())
+        );
     }
 
     #[test]
@@ -259,7 +271,14 @@ password = "pw"
 
     #[test]
     fn password_required_with_auth() {
-        let c = Config::load(None, Overrides { radio: Some("x:1".into()), ..Default::default() }).unwrap();
+        let c = Config::load(
+            None,
+            Overrides {
+                radio: Some("x:1".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert!(c.check().unwrap_err().contains("password"));
         assert_eq!(c.listeners[0].bind.port(), 5000);
     }
