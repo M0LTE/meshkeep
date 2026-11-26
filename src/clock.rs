@@ -112,6 +112,13 @@ impl FakeClock {
         g.sleepers.len()
     }
 
+    /// Number of live timers whose deadline satisfies `pred`.
+    pub fn pending_sleepers_matching(&self, pred: impl Fn(u64) -> bool) -> usize {
+        let mut g = self.inner.lock().unwrap();
+        g.sleepers.retain(|(_, tx)| !tx.is_closed());
+        g.sleepers.iter().filter(|(d, _)| pred(*d)).count()
+    }
+
     /// Earliest pending deadline, if any.
     pub fn next_deadline(&self) -> Option<u64> {
         let mut g = self.inner.lock().unwrap();

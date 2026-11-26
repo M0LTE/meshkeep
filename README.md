@@ -74,7 +74,7 @@ If you would rather use one port for several devices with fixed addresses, set `
 
 Open `http://<machine>:8080`. It works on phones, tablets and desktops: channels and direct conversations on the left, full history, sending, and delivery status (sent, delivered, not confirmed). Every open browser updates live.
 
-Sign-in uses the single password from the config. On a network you fully trust you can set `auth = false` under `[web]` instead.
+Sign-in uses the single password from the config. On a network you fully trust you can set `auth = false` under `[web]` instead; then the interface only answers when reached by IP address or a local name (such as `pi`, `meshkeep.local` or `meshkeep.lan`).
 
 ## Limitations
 

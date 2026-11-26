@@ -36,7 +36,8 @@ jobs:
             deb: amd64
           - target: aarch64-unknown-linux-musl
             deb: arm64
-          - target: armv7-unknown-linux-musleabihf
+          # ARMv6 hard float, so Pi Zero and Pi 1 work as well as later Pis.
+          - target: arm-unknown-linux-musleabihf
             deb: armhf
     steps:
       - uses: actions/checkout@v4
@@ -94,6 +95,12 @@ jobs:
           esac
           file check/usr/bin/meshkeep | grep -q "$want" || { echo "::error::binary is not $want"; exit 1; }
           file check/usr/bin/meshkeep | grep -q "statically linked" || { echo "::error::binary is not static"; exit 1; }
+          if [ "${{ matrix.deb }}" = armhf ]; then
+            attrs=$(readelf -A check/usr/bin/meshkeep)
+            echo "$attrs"
+            echo "$attrs" | grep -q "Tag_CPU_arch: v6" || { echo "::error::armhf binary is not ARMv6"; exit 1; }
+            echo "$attrs" | grep -q "Tag_ABI_VFP_args: VFP registers" || { echo "::error::armhf binary is not hard float"; exit 1; }
+          fi
       - uses: actions/upload-artifact@v4
         with:
           name: dist-${{ matrix.deb }}

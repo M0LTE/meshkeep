@@ -449,3 +449,168 @@ async fn store_survives_restart() {
     let mut phone = rig.app(0).await;
     assert_eq!(msg_text(&phone.sync_all().await[0]), "persisted");
 }
+
+/// After the link has dropped, let the backoff run and wait for the handshake.
+async fn back_after_restart(rig: &mut Rig) {
+    rig.wait_event(|e| matches!(e, Event::Radio { connected: false }))
+        .await;
+    let now = rig.clock.now_ms();
+    guard(rig.clock.wait_for_sleeper(|d| d == now + 1000)).await;
+    rig.clock.advance(Duration::from_secs(1));
+    rig.wait_event(|e| matches!(e, Event::Radio { connected: true }))
+        .await;
+    rig.wait_event(|e| matches!(e, Event::DrainDone)).await;
+}
+
+#[tokio::test]
+async fn reboot_restarts_link_even_when_the_port_survives() {
+    let mut rig = Rig::start().await;
+    rig.sim.set_reboot_keeps_connection(true);
+    let mut a = rig.app(0).await;
+    let mut f = vec![cmd::REBOOT];
+    f.extend_from_slice(b"reboot");
+    a.send(&f).await;
+    back_after_restart(&mut rig).await;
+    assert_eq!(rig.sim.reboots(), 1);
+    assert_eq!(rig.sim.connections(), 2);
+    assert_eq!(rig.sim.app_ver(), 3);
+}
+
+#[tokio::test]
+async fn cli_reboot_expects_no_reply_and_restarts_link() {
+    let mut rig = Rig::start().await;
+    rig.sim.set_reboot_keeps_connection(true);
+    let mut a = rig.app(0).await;
+    let mut f = vec![cmd::RUN_CLI_COMMAND];
+    f.extend_from_slice(b"reboot");
+    a.send(&f).await;
+    back_after_restart(&mut rig).await;
+    assert_eq!(rig.sim.app_ver(), 3);
+    // Not counted as a timeout, and the queue moved on.
+    assert_eq!(
+        a.request(&[cmd::GET_BATT_AND_STORAGE]).await[0],
+        resp::BATT_AND_STORAGE
+    );
+}
+
+#[tokio::test]
+async fn factory_reset_waits_for_ok_then_restarts_link() {
+    let mut rig = Rig::start().await;
+    rig.sim.set_reboot_keeps_connection(true);
+    let mut a = rig.app(0).await;
+    let mut f = vec![cmd::FACTORY_RESET];
+    f.extend_from_slice(b"reset");
+    assert_eq!(a.request(&f).await, vec![resp::OK]);
+    back_after_restart(&mut rig).await;
+    assert_eq!(rig.sim.connections(), 2);
+    // The radio's contacts are gone, and so is the cache.
+    assert!(rig.mk.store.contacts().is_empty());
+}
+
+#[tokio::test]
+async fn legacy_frame_means_radio_reset_so_handshake_again() {
+    let mut rig = Rig::start().await;
+    rig.sim.set_reboot_keeps_connection(true);
+    let alice = rig.alice.clone();
+    rig.sim.reboot();
+    rig.sim.receive_dm(&alice, 1, "after reset");
+    let e = rig.wait_event(|e| matches!(e, Event::Message { .. })).await;
+    let Event::Message { message } = e else {
+        unreachable!()
+    };
+    assert_eq!(message.text, "after reset");
+    assert_eq!(message.snr, None);
+    guard(rig.sim.wait_until(|s| s.app_ver() == 3)).await;
+    assert_eq!(rig.sim.count(cmd::DEVICE_QUERY), 2);
+    rig.wait_event(|e| matches!(e, Event::DrainDone)).await;
+    rig.sim.receive_dm(&alice, 2, "v3 again");
+    let e = rig.wait_event(|e| matches!(e, Event::Message { .. })).await;
+    let Event::Message { message } = e else {
+        unreachable!()
+    };
+    assert_eq!(message.snr, Some(5.0));
+}
+
+#[tokio::test]
+async fn store_failure_stops_draining_until_stored() {
+    let mut rig = Rig::start().await;
+    let alice = rig.alice.clone();
+    rig.mk
+        .store
+        .execute_batch_for_tests(
+            "CREATE TRIGGER nostore BEFORE INSERT ON messages BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+        )
+        .unwrap();
+    let now = rig.clock.now_ms();
+    rig.sim.receive_dm(&alice, 1, "one");
+    rig.sim.receive_dm(&alice, 2, "two");
+    guard(
+        rig.clock
+            .wait_for_sleeper(|d| d == now + meshkeep::hub::STORE_RETRY.as_millis() as u64),
+    )
+    .await;
+    // The first is held in memory; the second is still safe on the radio.
+    assert_eq!(rig.sim.queue_len(), 1);
+    assert_eq!(rig.mk.store.max_message_id(), 0);
+
+    rig.mk
+        .store
+        .execute_batch_for_tests("DROP TRIGGER nostore;")
+        .unwrap();
+    rig.clock.advance(meshkeep::hub::STORE_RETRY);
+    rig.wait_event(|e| matches!(e, Event::DrainDone)).await;
+    assert_eq!(rig.sim.queue_len(), 0);
+    let conv = format!("dm:{}", p::hex(&alice.prefix()));
+    let texts: Vec<String> = rig
+        .mk
+        .store
+        .messages(&conv, None, 10)
+        .into_iter()
+        .map(|m| m.text)
+        .collect();
+    assert_eq!(texts, ["one", "two"]);
+}
+
+#[tokio::test]
+async fn stale_ok_cannot_end_a_drain() {
+    let mut rig = Rig::start().await;
+    let mut a = rig.app(0).await;
+    rig.sim.set_hold(true);
+    a.send(&[cmd::SEND_SELF_ADVERT]).await;
+    guard(rig.sim.wait_until(|s| s.held() == 1)).await;
+    time_out(&rig).await;
+    rig.sim.receive_dm(&rig.alice.clone(), 1, "kept");
+    guard(rig.sim.wait_until(|s| s.held() == 2)).await;
+    rig.sim.release(); // late OK for the advert, arriving while the sync is in flight
+    rig.sim.set_hold(false);
+    rig.sim.release(); // the message
+    let e = rig.wait_event(|e| matches!(e, Event::Message { .. })).await;
+    let Event::Message { message } = e else {
+        unreachable!()
+    };
+    assert_eq!(message.text, "kept");
+    rig.wait_event(|e| matches!(e, Event::DrainDone)).await;
+    assert_eq!(rig.sim.queue_len(), 0);
+}
+
+#[tokio::test]
+async fn late_sync_answer_is_stored_whatever_is_in_flight() {
+    let mut rig = Rig::start().await;
+    let mut a = rig.app(0).await;
+    rig.sim.set_hold(true);
+    rig.sim.receive_dm(&rig.alice.clone(), 1, "late");
+    guard(rig.sim.wait_until(|s| s.held() == 1)).await;
+    time_out(&rig).await;
+    a.send(&[cmd::GET_BATT_AND_STORAGE]).await;
+    guard(rig.sim.wait_until(|s| s.held() == 2)).await;
+    rig.sim.release(); // the sync's message, while the battery query is in flight
+    let e = rig.wait_event(|e| matches!(e, Event::Message { .. })).await;
+    let Event::Message { message } = e else {
+        unreachable!()
+    };
+    assert_eq!(message.text, "late");
+    rig.sim.set_hold(false);
+    rig.sim.release();
+    assert_eq!(a.response().await[0], resp::BATT_AND_STORAGE);
+    rig.wait_event(|e| matches!(e, Event::DrainDone)).await;
+}

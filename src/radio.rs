@@ -122,6 +122,11 @@ async fn session(
             }
             f = out_rx.recv() => {
                 let Some(f) = f else { return heard };
+                // An empty frame from the hub means: close the link now.
+                if f.is_empty() {
+                    let _ = wr.flush().await;
+                    return heard;
+                }
                 if wr.write_all(&encode_frame(FRAME_TO_RADIO, &f)).await.is_err() {
                     return heard;
                 }

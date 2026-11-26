@@ -87,6 +87,8 @@ struct SimState {
     conn_kill: Option<oneshot::Sender<()>>,
     connections: u32,
     sent: Vec<(Vec<u8>, String)>,
+    reboot_keeps_connection: bool,
+    reboots: u32,
 }
 
 #[derive(Clone)]
@@ -128,6 +130,8 @@ impl SimRadio {
             conn_kill: None,
             connections: 0,
             sent: Vec::new(),
+            reboot_keeps_connection: false,
+            reboots: 0,
         }));
         let changed = Arc::new(Notify::new());
         let task = tokio::spawn(accept_loop(listener, st.clone(), changed.clone()));
@@ -220,6 +224,22 @@ impl SimRadio {
     }
 
     /// Stop answering; commands are held until [`SimRadio::release`].
+    /// Behave like a USB-UART board: a reboot does not close the serial port,
+    /// the link simply carries on talking to a freshly booted radio.
+    pub fn set_reboot_keeps_connection(&self, keep: bool) {
+        self.st.lock().unwrap().reboot_keeps_connection = keep;
+    }
+
+    /// Simulate the radio restarting on its own (watchdog, power blip).
+    pub fn reboot(&self) {
+        reboot(&mut self.st.lock().unwrap());
+        self.changed.notify_waiters();
+    }
+
+    pub fn reboots(&self) -> u32 {
+        self.st.lock().unwrap().reboots
+    }
+
     pub fn set_hold(&self, hold: bool) {
         self.st.lock().unwrap().hold = hold;
     }
@@ -318,6 +338,18 @@ fn queue_msg(st: &mut SimState, f: Vec<u8>) {
         st.queue.push_back(f);
     }
     send_out(st, vec![push::MSG_WAITING]);
+}
+
+/// A restart forgets per-session state; over WiFi it also drops the client.
+fn reboot(st: &mut SimState) {
+    st.reboots += 1;
+    st.app_ver = 0;
+    if !st.reboot_keeps_connection {
+        if let Some(k) = st.conn_kill.take() {
+            let _ = k.send(());
+        }
+        st.conn_out = None;
+    }
 }
 
 fn send_out(st: &SimState, f: Vec<u8>) {
@@ -538,11 +570,24 @@ fn handle(st: &mut SimState, c: &[u8]) -> Vec<Vec<u8>> {
             vec![f]
         }
         cmd::REBOOT if len >= 7 && &c[1..7] == b"reboot" => {
-            if let Some(k) = st.conn_kill.take() {
-                let _ = k.send(());
-            }
-            st.conn_out = None;
+            reboot(st);
             vec![]
+        }
+        cmd::FACTORY_RESET if len >= 6 && &c[1..6] == b"reset" => {
+            // OK goes out before the reboot.
+            send_out(st, vec![resp::OK]);
+            st.contacts.clear();
+            reboot(st);
+            vec![]
+        }
+        cmd::RUN_CLI_COMMAND if len >= 3 => {
+            if p::cli_restarts_radio(c) {
+                reboot(st);
+                return vec![];
+            }
+            let mut f = vec![resp::CLI_REPLY];
+            f.extend_from_slice(b"Unknown command");
+            vec![f]
         }
         _ => e(err::UNSUPPORTED_CMD),
     }

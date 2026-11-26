@@ -69,6 +69,7 @@ pub struct RigOpts {
     pub listeners: Vec<Listener>,
     pub before_start: BeforeStart,
     pub dir: Option<PathBuf>,
+    pub auth: bool,
 }
 
 impl Default for RigOpts {
@@ -77,6 +78,7 @@ impl Default for RigOpts {
             listeners: listeners(&[("phone", false), ("tablet", false)]),
             before_start: Box::new(|_, _, _| {}),
             dir: None,
+            auth: true,
         }
     }
 }
@@ -102,7 +104,7 @@ impl Rig {
             listeners: o.listeners,
             web_bind: Some("127.0.0.1:0".parse().unwrap()),
             password: Some(PASSWORD.into()),
-            auth: true,
+            auth: o.auth,
         };
         let mk = meshkeep::start(cfg, clock.clone())
             .await

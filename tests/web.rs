@@ -236,3 +236,100 @@ async fn web_sends_wait_their_turn_behind_apps() {
         .await;
     assert_eq!(rig.sim.max_held(), 1);
 }
+
+#[tokio::test]
+async fn cross_site_requests_are_refused() {
+    let rig = Rig::start().await;
+    let cookie = login(&rig).await;
+    let conv = format!("dm:{}", p::hex(&rig.alice.prefix()));
+    let send = |origin: String| {
+        http()
+            .post(format!("{}/api/send", rig.web()))
+            .header("cookie", &cookie)
+            .header("origin", origin)
+            .json(&json!({ "conv": conv, "text": "hi" }))
+            .send()
+    };
+    assert_eq!(
+        send("http://evil.example".into()).await.unwrap().status(),
+        403
+    );
+    assert_eq!(send(rig.web()).await.unwrap().status(), 200);
+
+    // Logging in from another site is refused too.
+    let r = http()
+        .post(format!("{}/login", rig.web()))
+        .header("origin", "http://evil.example")
+        .form(&[("password", PASSWORD)])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), 403);
+
+    let mut req = format!("ws://{}/api/events", rig.mk.web.unwrap())
+        .into_client_request()
+        .unwrap();
+    req.headers_mut().insert("cookie", cookie.parse().unwrap());
+    req.headers_mut()
+        .insert("origin", "http://evil.example".parse().unwrap());
+    assert!(guard(tokio_tungstenite::connect_async(req)).await.is_err());
+}
+
+#[tokio::test]
+async fn without_sign_in_only_local_host_names_are_served() {
+    let rig = Rig::start_with(RigOpts {
+        auth: false,
+        ..Default::default()
+    })
+    .await;
+    let port = rig.mk.web.unwrap().port();
+    let get = |host: String| {
+        http()
+            .get(format!("{}/api/state", rig.web()))
+            .header("host", host)
+            .send()
+    };
+    assert_eq!(
+        get(format!("127.0.0.1:{port}")).await.unwrap().status(),
+        200
+    );
+    assert_eq!(
+        get(format!("meshkeep.lan:{port}")).await.unwrap().status(),
+        200
+    );
+    assert_eq!(
+        get(format!("rebind.example.com:{port}"))
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+}
+
+#[tokio::test]
+async fn wrong_passwords_are_throttled_across_all_requests() {
+    use meshkeep::clock::Clock;
+    use std::time::Duration;
+    let rig = Rig::start().await;
+    let attempt = || {
+        http()
+            .post(format!("{}/login", rig.web()))
+            .form(&[("password", "guess")])
+            .send()
+    };
+    let start = rig.clock.now_ms();
+    let first = tokio::spawn(attempt());
+    let second = tokio::spawn(attempt());
+    // Only one attempt is ever waiting out its delay.
+    guard(rig.clock.wait_for_sleeper(|d| d == start + 1000)).await;
+    assert_eq!(
+        rig.clock
+            .pending_sleepers_matching(|d| d > start && d <= start + 2000),
+        1
+    );
+    rig.clock.advance(Duration::from_secs(1));
+    guard(rig.clock.wait_for_sleeper(|d| d == start + 2000)).await;
+    rig.clock.advance(Duration::from_secs(1));
+    assert_eq!(guard(first).await.unwrap().unwrap().status(), 401);
+    assert_eq!(guard(second).await.unwrap().unwrap().status(), 401);
+}

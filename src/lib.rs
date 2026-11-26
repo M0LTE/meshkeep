@@ -115,6 +115,7 @@ pub async fn start(cfg: Config, clock: SharedClock) -> Result<Running, String> {
             status: status.clone(),
             clock: clock.clone(),
             password: if cfg.auth { cfg.password.clone() } else { None },
+            login_gate: Default::default(),
         });
         tasks.push(tokio::spawn(async move {
             let _ = axum::serve(sock, app).await;

@@ -49,6 +49,19 @@ The radio's offline queue is drained with `CMD_SYNC_NEXT_MESSAGE` until `NO_MORE
 - on every connect;
 - every 60 seconds as a safety net.
 
+The radio forgets a message the moment it hands it over, so draining is careful:
+
+- A message is stored before the next one is requested. If SQLite refuses (disk full, permissions), meshkeep keeps the message in memory, stops draining, and retries every 5 seconds; the rest stay safe on the radio until then.
+- A frame that does not parse is stored verbatim rather than dropped, and still handed to apps.
+- Message frames (codes 7, 8, 16, 17, 27) only ever answer a sync, so they are stored whatever command is in flight, for example when a sync timed out and its answer turns up late.
+- A sync is finished only by a message frame, `NO_MORE_MESSAGES`, or a code newer than this firmware knows (taken as a new kind of message and stored verbatim). A stray `OK` or `ERR` from a timed-out command cannot end a drain.
+
+## Radio restarts
+
+After forwarding a command that restarts the radio (`CMD_REBOOT "reboot"`, `CMD_FACTORY_RESET "reset"` once its `OK` arrives, or `CMD_RUN_CLI_COMMAND` with `reboot`, `poweroff` or `shutdown`), meshkeep closes the radio link and reconnects, which runs the handshake again. This matters for USB boards with a separate USB-UART chip, where the serial port survives the reboot and the link would otherwise carry on with a radio that has forgotten its session settings. The CLI forms get no reply from the firmware, so meshkeep does not wait for one.
+
+If the radio restarts on its own, the first message drained afterwards arrives in the legacy layout (it has forgotten that meshkeep asked for v3). meshkeep then repeats the session setup (`CMD_DEVICE_QUERY`, `CMD_APP_START`, `CMD_SET_DEVICE_TIME`) before continuing.
+
 meshkeep caches self info, device info, contacts and channels in SQLite. It keeps the cache current by watching replies to anyone's commands, `NEW_ADVERT`, `CONTACT_DELETED`, and by refetching a contact after `PUSH_CODE_ADVERT` or `PATH_UPDATED`, or after an app adds, updates or removes contacts or channels.
 
 ## Message format per app
@@ -116,7 +129,14 @@ These are rare in practice and are left as is.
 
 ## Web authentication
 
-One password from the config. A successful sign-in creates a random 256-bit session token, stored in SQLite (so restarts keep you signed in) and sent as an `HttpOnly`, `SameSite=Strict` cookie valid for 30 days. Wrong passwords are answered after a one second delay. `SameSite=Strict` also keeps other sites from opening the WebSocket with your cookie. Serve it behind a TLS reverse proxy if it is reachable from outside your network.
+One password from the config. A successful sign-in creates a random 256-bit session token, stored in SQLite (so restarts keep you signed in) and sent as an `HttpOnly`, `SameSite=Strict` cookie valid for 30 days. Sign-in attempts are handled one at a time across all clients, and a wrong password holds that slot for one second, so guessing is limited to one try a second in total.
+
+Cross-site protection, for every request:
+
+- `POST` requests and the WebSocket are refused when the browser's `Origin` header does not match the `Host` the request was made to. Requests without `Origin` (non-browser clients) are allowed.
+- With sign-in off, the `Host` must be an IP address, `localhost`, a single-label name (`pi`), or end in `.local`, `.lan`, `.home.arpa` or `.internal`. This blocks DNS rebinding, where a hostile site points its own domain at your LAN address. If you reach meshkeep by another name, turn sign-in on.
+
+Serve it behind a TLS reverse proxy if it is reachable from outside your network.
 
 ## Testing
 

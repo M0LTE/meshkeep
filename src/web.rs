@@ -4,13 +4,17 @@
 
 use std::time::Duration;
 
+use axum::extract::Request;
 use axum::extract::ws::{Message as WsMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::{Query, State};
+use axum::http::Method;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Form, Json, Router};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::clock::SharedClock;
@@ -37,6 +41,10 @@ pub struct WebState {
     pub clock: SharedClock,
     /// `None` means authentication is off.
     pub password: Option<String>,
+    /// Sign-in attempts run one at a time; a wrong password holds this for
+    /// [`FAILED_LOGIN_DELAY`], so guessing is limited to one try a second
+    /// across all clients.
+    pub login_gate: Arc<tokio::sync::Mutex<()>>,
 }
 
 pub fn router(state: WebState) -> Router {
@@ -57,7 +65,72 @@ pub fn router(state: WebState) -> Router {
         .route("/api/messages", get(api_messages))
         .route("/api/send", post(api_send))
         .route("/api/events", get(api_events))
+        .layer(middleware::from_fn_with_state(state.clone(), request_guard))
         .with_state(state)
+}
+
+/// Host names a browser can reach meshkeep by on a local network. Anything
+/// else (a public domain name) could be a DNS rebinding attack.
+fn local_host(host: &str) -> bool {
+    let name = if let Some(rest) = host.strip_prefix('[') {
+        // [v6]:port
+        return rest
+            .split(']')
+            .next()
+            .is_some_and(|ip| ip.parse::<std::net::Ipv6Addr>().is_ok());
+    } else {
+        host.rsplit_once(':').map_or(host, |(h, port)| {
+            if port.chars().all(|c| c.is_ascii_digit()) {
+                h
+            } else {
+                host
+            }
+        })
+    };
+    let name = name.trim_end_matches('.').to_ascii_lowercase();
+    name.parse::<std::net::Ipv4Addr>().is_ok()
+        || name == "localhost"
+        || !name.contains('.')
+        || [".local", ".lan", ".home.arpa", ".internal", ".localhost"]
+            .iter()
+            .any(|s| name.ends_with(s))
+}
+
+/// Cross-site protection for every request.
+///
+/// - State-changing requests and the WebSocket must come from a page served
+///   by meshkeep itself: a browser's `Origin` must match `Host`.
+/// - With sign-in off, `Host` must be a local name or an IP address, so a
+///   hostile site cannot reach meshkeep through DNS rebinding.
+async fn request_guard(State(s): State<WebState>, req: Request, next: Next) -> Response {
+    let host = req
+        .headers()
+        .get(header::HOST)
+        .and_then(|h| h.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if host.is_empty() {
+        return (StatusCode::BAD_REQUEST, "Missing Host header").into_response();
+    }
+    if s.password.is_none() && !local_host(&host) {
+        return (
+            StatusCode::FORBIDDEN,
+            "With sign-in off, use an IP address or local host name",
+        )
+            .into_response();
+    }
+    let checked = req.method() != Method::GET && req.method() != Method::HEAD
+        || req.uri().path() == "/api/events";
+    if checked && let Some(origin) = req.headers().get(header::ORIGIN) {
+        let origin = origin.to_str().unwrap_or("").to_ascii_lowercase();
+        let origin_host = origin
+            .split_once("://")
+            .map(|(_, h)| h.trim_end_matches('/'));
+        if origin_host != Some(host.as_str()) {
+            return (StatusCode::FORBIDDEN, "Cross-site request refused").into_response();
+        }
+    }
+    next.run(req).await
 }
 
 async fn asset(ctype: &'static str, body: &'static str) -> Response {
@@ -121,6 +194,29 @@ async fn login_page(State(s): State<WebState>, headers: HeaderMap) -> Response {
     html(LOGIN_HTML.replace("{{ERROR}}", ""))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::local_host;
+
+    #[test]
+    fn local_hosts() {
+        for h in [
+            "192.168.1.5:8080",
+            "[::1]:8080",
+            "localhost:8080",
+            "pi:8080",
+            "meshkeep.lan",
+            "box.local:80",
+            "10.0.0.1",
+        ] {
+            assert!(local_host(h), "{h}");
+        }
+        for h in ["evil.example.com", "evil.com:8080", "1.2.3.4.nip.io"] {
+            assert!(!local_host(h), "{h}");
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct LoginForm {
     password: String,
@@ -143,6 +239,7 @@ async fn login(State(s): State<WebState>, Form(f): Form<LoginForm>) -> Response 
     let Some(pw) = &s.password else {
         return Redirect::to("/").into_response();
     };
+    let _gate = s.login_gate.lock().await;
     if !ct_eq(f.password.as_bytes(), pw.as_bytes()) {
         s.clock.sleep(FAILED_LOGIN_DELAY).await;
         let page = LOGIN_HTML.replace(

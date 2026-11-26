@@ -27,6 +27,8 @@ pub const RADIO_WAIT: Duration = Duration::from_secs(3);
 pub const DRAIN_INTERVAL: Duration = Duration::from_secs(60);
 /// Grace on top of the radio's own ack timeout estimate.
 pub const ACK_GRACE: Duration = Duration::from_secs(5);
+/// How soon to try again after a message could not be stored.
+pub const STORE_RETRY: Duration = Duration::from_secs(5);
 /// Back-to-back response timeouts before the radio link is restarted.
 const TIMEOUTS_BEFORE_RECONNECT: u32 = 2;
 /// The protocol version meshkeep itself speaks (the firmware switches message
@@ -162,6 +164,12 @@ pub struct Hub {
     draining: bool,
     drain_again: bool,
     next_drain_at: u64,
+    /// Messages taken off the radio but not yet stored. While any are here no
+    /// more are taken: the radio's queue is destructive.
+    unstored: VecDeque<p::InboundMessage>,
+    store_retry_at: u64,
+    /// A legacy layout frame already triggered a re-handshake.
+    rehandshaked: bool,
     ack_deadlines: Vec<(i64, u64)>,
     clients: HashMap<ConnId, Client>,
 }
@@ -190,6 +198,9 @@ impl Hub {
             draining: false,
             drain_again: false,
             next_drain_at: u64::MAX,
+            unstored: VecDeque::new(),
+            store_retry_at: u64::MAX,
+            rehandshaked: false,
             ack_deadlines: Vec::new(),
             clients: HashMap::new(),
         }
@@ -231,6 +242,9 @@ impl Hub {
             d = d.min(self.next_drain_at);
         } else if let Some(c) = self.client_q.front() {
             d = d.min(c.enqueued_ms + RADIO_WAIT.as_millis() as u64);
+        }
+        if !self.unstored.is_empty() {
+            d = d.min(self.store_retry_at);
         }
         for (_, a) in &self.ack_deadlines {
             d = d.min(*a);
@@ -282,24 +296,40 @@ impl Hub {
         self.internal_q.clear();
         self.draining = false;
         self.next_drain_at = self.now() + DRAIN_INTERVAL.as_millis() as u64;
+        self.rehandshaked = false;
         self.status.lock().unwrap().radio_connected = true;
 
+        for c in self.session_setup() {
+            self.internal(c);
+        }
+        self.internal(vec![cmd::GET_CONTACTS]);
+        self.schedule_drain();
+        self.emit(Event::Radio { connected: true });
+    }
+
+    /// Commands that set up the radio's per-session state: protocol version
+    /// (message layout), app start and clock.
+    fn session_setup(&self) -> Vec<Vec<u8>> {
         let ver = self
             .store
             .get_kv("app_ver")
             .and_then(|v| v.first().copied())
             .unwrap_or(0)
             .max(OWN_APP_VER);
-        self.internal(vec![cmd::DEVICE_QUERY, ver]);
         let mut start = vec![cmd::APP_START, 1, 0, 0, 0, 0, 0, 0];
         start.extend_from_slice(b"meshkeep");
-        self.internal(start);
         let mut t = vec![cmd::SET_DEVICE_TIME];
         t.extend_from_slice(&(self.clock.now_unix() as u32).to_le_bytes());
-        self.internal(t);
-        self.internal(vec![cmd::GET_CONTACTS]);
-        self.schedule_drain();
-        self.emit(Event::Radio { connected: true });
+        vec![vec![cmd::DEVICE_QUERY, ver], start, t]
+    }
+
+    /// Close the radio link once everything already sent has been written;
+    /// the radio task reconnects and the handshake runs again.
+    fn restart_link(&mut self) {
+        if let Some(r) = &self.radio {
+            info!("radio is restarting, reconnecting");
+            let _ = r.send(Vec::new());
+        }
     }
 
     fn radio_down(&mut self) {
@@ -344,7 +374,7 @@ impl Hub {
     }
 
     fn schedule_drain(&mut self) {
-        if self.radio.is_none() {
+        if self.radio.is_none() || !self.unstored.is_empty() {
             return;
         }
         if self.draining {
@@ -366,6 +396,17 @@ impl Hub {
             self.radio_push(f);
             return;
         }
+        if p::is_message_code(code) {
+            // Only a sync produces these, so it is a message whatever is in
+            // flight (a late answer to a timed-out sync, say). Never drop one.
+            let sync = self.in_flight_is_sync();
+            if sync {
+                self.in_flight = None;
+                self.timeouts = 0;
+            }
+            self.take_message(f, sync);
+            return;
+        }
         let Some(inf) = self.in_flight.as_mut() else {
             debug!("radio sent 0x{code:02x} with no command outstanding, dropped");
             return;
@@ -382,7 +423,16 @@ impl Hub {
                     return;
                 }
             }
-            Expect::AnyOne | Expect::SyncNext | Expect::SelfTelemetry => true,
+            Expect::AnyOne | Expect::SelfTelemetry => true,
+            // Not OK or ERR: those can only be late answers to something else.
+            Expect::SyncNext => {
+                if code == resp::NO_MORE_MESSAGES || p::is_unknown_code(code) {
+                    true
+                } else {
+                    debug!("radio sent 0x{code:02x} for a sync, dropped");
+                    return;
+                }
+            }
             Expect::Contacts => match code {
                 resp::CONTACTS_START | resp::CONTACT => {
                     inf.deadline = self.clock.now_ms() + RESPONSE_TIMEOUT.as_millis() as u64;
@@ -484,6 +534,7 @@ impl Hub {
                 self.emit(Event::Channels);
             }
             resp::OK => match sent {
+                cmd::FACTORY_RESET if p::restarts_radio(&c.frame) => self.restart_link(),
                 cmd::REMOVE_CONTACT if c.frame.len() > 32 => {
                     self.store.delete_contact(&c.frame[1..33]);
                     self.emit(Event::Contacts);
@@ -512,45 +563,102 @@ impl Hub {
         }
     }
 
+    fn in_flight_is_sync(&self) -> bool {
+        self.in_flight.as_ref().is_some_and(|f| {
+            matches!(f.cmd.origin, Origin::Internal) && f.cmd.frame[0] == cmd::SYNC_NEXT_MESSAGE
+        })
+    }
+
     fn internal_result(&mut self, cmd_frame: &[u8], f: &[u8]) {
         if cmd_frame[0] != cmd::SYNC_NEXT_MESSAGE {
             return;
         }
-        let code = f[0];
-        if p::is_queued_message(code) {
-            if let Some(m) = p::parse_inbound(f) {
-                self.store_inbound(m);
-            }
-            // Keep going, behind anything apps have queued meanwhile.
-            self.internal(vec![cmd::SYNC_NEXT_MESSAGE]);
+        if p::is_unknown_code(f[0]) {
+            // A kind of message this version does not know: keep it verbatim.
+            self.take_message(f.to_vec(), true);
+            return;
+        }
+        self.draining = false;
+        if self.drain_again {
+            self.schedule_drain();
         } else {
-            self.draining = false;
-            if self.drain_again {
-                self.schedule_drain();
-            } else {
-                self.emit(Event::DrainDone);
-            }
+            self.emit(Event::DrainDone);
         }
     }
 
-    fn store_inbound(&mut self, m: p::InboundMessage) {
-        let ch_name = m.channel.and_then(|i| self.store.channel_name(i));
-        match self
-            .store
-            .insert_inbound(&m, self.clock.now_unix(), ch_name.as_deref())
-        {
-            Ok(id) => {
-                debug!("stored {} message {id}", m.kind.as_str());
-                if let Some(msg) = self.store.message(id) {
-                    self.emit(Event::Message { message: msg });
-                }
-                // Tickle every app, as the radio does when it queues a message.
-                let conns: Vec<ConnId> = self.clients.keys().copied().collect();
-                for c in conns {
-                    self.send_to(c, vec![push::MSG_WAITING]);
+    /// A message the radio has handed over (and so forgotten).
+    fn take_message(&mut self, f: Vec<u8>, continue_drain: bool) {
+        if p::is_legacy_message(f[0]) {
+            // We asked for v3, so the radio has restarted and forgotten it.
+            if !self.rehandshaked && self.radio.is_some() {
+                self.rehandshaked = true;
+                info!("radio has lost its session settings, setting it up again");
+                let now = self.now();
+                for c in self.session_setup().into_iter().rev() {
+                    self.internal_q.push_front(Cmd {
+                        origin: Origin::Internal,
+                        frame: c,
+                        enqueued_ms: now,
+                    });
                 }
             }
-            Err(e) => warn!("cannot store message, check the data directory: {e}"),
+        } else {
+            self.rehandshaked = false;
+        }
+        if let Some(m) = p::parse_inbound(&f) {
+            self.unstored.push_back(m);
+        }
+        if !continue_drain {
+            // A late answer to a sync that timed out: the drain had stopped.
+            self.draining = false;
+        }
+        if self.flush_unstored() {
+            if continue_drain {
+                // Keep going, behind anything apps have queued meanwhile.
+                self.internal(vec![cmd::SYNC_NEXT_MESSAGE]);
+            } else {
+                self.schedule_drain();
+            }
+        } else {
+            self.draining = false;
+            self.store_retry_at = self.now() + STORE_RETRY.as_millis() as u64;
+        }
+    }
+
+    /// Store everything held in memory, in order. True when all are stored.
+    fn flush_unstored(&mut self) -> bool {
+        while let Some(m) = self.unstored.front() {
+            let ch_name = m.channel.and_then(|i| self.store.channel_name(i));
+            match self
+                .store
+                .insert_inbound(m, self.clock.now_unix(), ch_name.as_deref())
+            {
+                Ok(id) => {
+                    let m = self.unstored.pop_front().unwrap();
+                    self.stored(id, &m);
+                }
+                Err(e) => {
+                    warn!(
+                        "cannot store message, check the data directory; {} held, retrying in {}s: {e}",
+                        self.unstored.len(),
+                        STORE_RETRY.as_secs()
+                    );
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn stored(&mut self, id: i64, m: &p::InboundMessage) {
+        debug!("stored {} message {id}", m.kind.as_str());
+        if let Some(msg) = self.store.message(id) {
+            self.emit(Event::Message { message: msg });
+        }
+        // Tickle every app, as the radio does when it queues a message.
+        let conns: Vec<ConnId> = self.clients.keys().copied().collect();
+        for c in conns {
+            self.send_to(c, vec![push::MSG_WAITING]);
         }
     }
 
@@ -642,6 +750,9 @@ impl Hub {
             }
             let expect = p::expect_for(&c.frame);
             if expect == Expect::Nothing {
+                if p::restarts_radio(&c.frame) {
+                    self.restart_link();
+                }
                 continue;
             }
             let listing = (c.frame[0] == cmd::GET_CONTACTS && c.frame.len() < 5).then(Vec::new);
@@ -676,6 +787,14 @@ impl Hub {
                 warn!("radio is not answering, reconnecting");
                 self.timeouts = 0;
                 let _ = self.kick.send(());
+            }
+        }
+        if !self.unstored.is_empty() && now >= self.store_retry_at {
+            if self.flush_unstored() {
+                self.store_retry_at = u64::MAX;
+                self.schedule_drain();
+            } else {
+                self.store_retry_at = now + STORE_RETRY.as_millis() as u64;
             }
         }
         if self.radio.is_some() && now >= self.next_drain_at {

@@ -263,7 +263,8 @@ pub fn expect_for(frame: &[u8]) -> Expect {
         SYNC_NEXT_MESSAGE => Expect::SyncNext,
         EXPORT_CONTACT => Expect::One(&[r::EXPORT_CONTACT]),
         REBOOT if frame.len() >= 7 && &frame[1..7] == b"reboot" => Expect::Nothing,
-        FACTORY_RESET if frame.len() >= 6 && &frame[1..6] == b"reset" => Expect::Nothing,
+        // The firmware answers OK (or ERR) and then reboots.
+        FACTORY_RESET if frame.len() >= 6 && &frame[1..6] == b"reset" => Expect::One(OKS),
         GET_BATT_AND_STORAGE => Expect::One(&[r::BATT_AND_STORAGE]),
         DEVICE_QUERY => Expect::One(&[r::DEVICE_INFO]),
         EXPORT_PRIVATE_KEY => Expect::One(&[r::PRIVATE_KEY, r::DISABLED]),
@@ -281,6 +282,7 @@ pub fn expect_for(frame: &[u8]) -> Expect {
         GET_AUTOADD_CONFIG => Expect::One(&[r::AUTOADD_CONFIG]),
         GET_ALLOWED_REPEAT_FREQ => Expect::One(&[r::ALLOWED_REPEAT_FREQ]),
         GET_DEFAULT_FLOOD_SCOPE => Expect::One(&[r::DEFAULT_FLOOD_SCOPE]),
+        RUN_CLI_COMMAND if cli_restarts_radio(frame) => Expect::Nothing,
         RUN_CLI_COMMAND => Expect::One(&[r::CLI_REPLY]),
         SEND_CHANNEL_TXT_MSG
         | SET_DEVICE_TIME
@@ -510,13 +512,81 @@ impl MsgKind {
 
 /// Is this code something `CMD_SYNC_NEXT_MESSAGE` hands out (as opposed to
 /// `NO_MORE_MESSAGES` or an error)?
-pub fn is_queued_message(code: u8) -> bool {
-    !matches!(code, resp::NO_MORE_MESSAGES | resp::ERR | resp::OK) && !is_push(code)
+/// `CMD_RUN_CLI_COMMAND` text that makes the firmware reboot or power off
+/// without replying (`MyMesh::handleCommand`).
+pub fn cli_restarts_radio(frame: &[u8]) -> bool {
+    if frame.len() < 3 || frame[0] != cmd::RUN_CLI_COMMAND {
+        return false;
+    }
+    let mut t = &frame[1..];
+    if let Some(nul) = t.iter().position(|&b| b == 0) {
+        t = &t[..nul];
+    }
+    while let Some((b' ', rest)) = t.split_first() {
+        t = rest;
+    }
+    // Optional "xx|" prefix, reflected back by the firmware.
+    if t.len() > 4 && t[2] == b'|' {
+        t = &t[3..];
+    }
+    matches!(t, b"reboot" | b"poweroff" | b"shutdown")
 }
 
-/// Parse a frame returned by `CMD_SYNC_NEXT_MESSAGE`. Unknown future message
-/// codes come back as [`MsgKind::Other`] with the frame kept verbatim.
+/// Commands after which the radio restarts, so meshkeep restarts its link
+/// and handshakes again when the radio is back.
+pub fn restarts_radio(frame: &[u8]) -> bool {
+    match frame.first() {
+        Some(&cmd::REBOOT) => frame.len() >= 7 && &frame[1..7] == b"reboot",
+        Some(&cmd::FACTORY_RESET) => frame.len() >= 6 && &frame[1..6] == b"reset",
+        Some(&cmd::RUN_CLI_COMMAND) => cli_restarts_radio(frame),
+        _ => false,
+    }
+}
+
+/// Codes only `CMD_SYNC_NEXT_MESSAGE` produces.
+pub fn is_message_code(code: u8) -> bool {
+    matches!(
+        code,
+        resp::CONTACT_MSG_RECV
+            | resp::CHANNEL_MSG_RECV
+            | resp::CONTACT_MSG_RECV_V3
+            | resp::CHANNEL_MSG_RECV_V3
+            | resp::CHANNEL_DATA_RECV
+    )
+}
+
+/// Response codes newer than this firmware knows of. A sync answered with one
+/// is taken to be a new kind of message and stored verbatim.
+pub fn is_unknown_code(code: u8) -> bool {
+    code > resp::CLI_REPLY && !is_push(code)
+}
+
+/// Is this frame a legacy (pre v3) message layout?
+pub fn is_legacy_message(code: u8) -> bool {
+    matches!(code, resp::CONTACT_MSG_RECV | resp::CHANNEL_MSG_RECV)
+}
+
+/// Parse a frame returned by `CMD_SYNC_NEXT_MESSAGE`. Unknown or malformed
+/// frames come back as [`MsgKind::Other`] with the frame kept verbatim, so
+/// nothing taken off the radio is thrown away. `None` only for an empty frame.
 pub fn parse_inbound(f: &[u8]) -> Option<InboundMessage> {
+    if f.is_empty() {
+        return None;
+    }
+    Some(parse_known(f).unwrap_or_else(|| InboundMessage {
+        kind: MsgKind::Other,
+        prefix: None,
+        channel: None,
+        snr: None,
+        path_len: 0,
+        txt_type: 0,
+        sender_ts: 0,
+        text: String::new(),
+        frame_v3: f.to_vec(),
+    }))
+}
+
+fn parse_known(f: &[u8]) -> Option<InboundMessage> {
     let code = *f.first()?;
     let (v3, snr_known) = match code {
         resp::CONTACT_MSG_RECV => {
@@ -595,17 +665,7 @@ pub fn parse_inbound(f: &[u8]) -> Option<InboundMessage> {
                 frame_v3: v3,
             })
         }
-        _ => Some(InboundMessage {
-            kind: MsgKind::Other,
-            prefix: None,
-            channel: None,
-            snr: None,
-            path_len: 0,
-            txt_type: 0,
-            sender_ts: 0,
-            text: String::new(),
-            frame_v3: v3,
-        }),
+        _ => None,
     }
 }
 
@@ -789,5 +849,29 @@ mod tests {
             Expect::SelfTelemetry
         );
         assert_eq!(expect_for(&[200]), Expect::AnyOne);
+        assert_eq!(
+            expect_for(&[cmd::FACTORY_RESET, b'r', b'e', b's', b'e', b't']),
+            Expect::One(&[resp::OK])
+        );
+        let cli = |t: &str| [&[cmd::RUN_CLI_COMMAND][..], t.as_bytes()].concat();
+        assert_eq!(expect_for(&cli("reboot")), Expect::Nothing);
+        assert_eq!(expect_for(&cli("  ab|poweroff")), Expect::Nothing);
+        assert_eq!(expect_for(&cli("shutdown")), Expect::Nothing);
+        assert_eq!(expect_for(&cli("ver")), Expect::One(&[resp::CLI_REPLY]));
+        assert_eq!(
+            expect_for(&cli("reboot now")),
+            Expect::One(&[resp::CLI_REPLY])
+        );
+        assert!(restarts_radio(&cli("reboot")));
+        assert!(!restarts_radio(&[cmd::REBOOT, b'x']));
+    }
+
+    #[test]
+    fn malformed_messages_are_kept_raw() {
+        let f = vec![resp::CONTACT_MSG_RECV_V3, 1, 2];
+        let m = parse_inbound(&f).unwrap();
+        assert_eq!(m.kind, MsgKind::Other);
+        assert_eq!(m.frame_v3, f);
+        assert!(parse_inbound(&[]).is_none());
     }
 }

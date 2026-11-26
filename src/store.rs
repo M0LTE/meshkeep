@@ -158,6 +158,12 @@ impl Store {
         self.conn.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Run raw SQL. For tests that need the database to misbehave.
+    #[doc(hidden)]
+    pub fn execute_batch_for_tests(&self, sql: &str) -> rusqlite::Result<()> {
+        self.db().execute_batch(sql)
+    }
+
     pub fn max_message_id(&self) -> i64 {
         self.db()
             .query_row("SELECT COALESCE(MAX(id), 0) FROM messages", [], |r| {
