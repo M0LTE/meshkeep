@@ -149,6 +149,13 @@ impl Store {
 
     fn init(conn: Connection) -> rusqlite::Result<Store> {
         conn.execute_batch(SCHEMA)?;
+        // 0.2.0: mirrors of sent messages remember which client sent them.
+        let has_origin: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('messages') WHERE name = 'origin_client'")?
+            .exists([])?;
+        if !has_origin {
+            conn.execute_batch("ALTER TABLE messages ADD COLUMN origin_client TEXT")?;
+        }
         Ok(Store {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -301,7 +308,7 @@ impl Store {
         let db = self.db();
         let mut st = db
             .prepare(&format!(
-                "SELECT {MSG_COLS} FROM messages WHERE conv = ?1 AND id < ?2 ORDER BY id DESC LIMIT ?3"
+                "SELECT {MSG_COLS} FROM messages WHERE conv = ?1 AND id < ?2 AND direction != 'mirror' ORDER BY id DESC LIMIT ?3"
             ))
             .expect("prepare");
         let mut v: Vec<Message> = st
@@ -320,7 +327,7 @@ impl Store {
         let mut st = db
             .prepare(
                 "SELECT m.conv, m.id, m.received_at, m.text, m.direction FROM messages m
-                 JOIN (SELECT conv, MAX(id) AS mid FROM messages WHERE kind IN ('dm','channel') GROUP BY conv) l
+                 JOIN (SELECT conv, MAX(id) AS mid FROM messages WHERE kind IN ('dm','channel') AND direction != 'mirror' GROUP BY conv) l
                  ON m.id = l.mid ORDER BY m.id DESC",
             )
             .expect("prepare");
@@ -375,16 +382,39 @@ impl Store {
     }
 
     /// Next message an app should receive after `after`: (id, v3 frame).
-    pub fn next_for_app(&self, after: i64) -> Option<(i64, Vec<u8>)> {
+    /// Next frame an app should receive after `after`: (id, v3 frame).
+    /// Received messages, plus mirrors of messages sent by other clients.
+    pub fn next_for_app(&self, after: i64, client: &str) -> Option<(i64, Vec<u8>)> {
         self.db()
             .query_row(
-                "SELECT id, frame FROM messages WHERE id > ?1 AND direction = 'in' AND frame IS NOT NULL ORDER BY id LIMIT 1",
-                params![after],
+                "SELECT id, frame FROM messages WHERE id > ?1 AND frame IS NOT NULL
+                 AND (direction = 'in' OR (direction = 'mirror' AND (origin_client IS NULL OR origin_client != ?2)))
+                 ORDER BY id LIMIT 1",
+                params![after, client],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()
             .ok()
             .flatten()
+    }
+
+    /// Store a mirror of a sent message for the other apps: never shown in
+    /// the web view, never handed to `origin_client`.
+    pub fn insert_mirror(
+        &self,
+        conv: &str,
+        kind: MsgKind,
+        at: u64,
+        frame: &[u8],
+        origin_client: Option<&str>,
+    ) -> rusqlite::Result<i64> {
+        let db = self.db();
+        db.execute(
+            "INSERT INTO messages (conv, direction, kind, received_at, sender_ts, text, frame, origin_client)
+             VALUES (?1, 'mirror', ?2, ?3, 0, '', ?4, ?5)",
+            params![conv, kind.as_str(), at as i64, frame, origin_client],
+        )?;
+        Ok(db.last_insert_rowid())
     }
 
     /// Id of the n-th newest inbound message (for new-device backlog limits).
@@ -645,9 +675,9 @@ mod tests {
         )
         .unwrap();
         let c = s.insert_inbound(&dm("two"), 3, None).unwrap();
-        assert_eq!(s.next_for_app(0).unwrap().0, a);
-        assert_eq!(s.next_for_app(a).unwrap().0, c);
-        assert!(s.next_for_app(c).is_none());
+        assert_eq!(s.next_for_app(0, "x").unwrap().0, a);
+        assert_eq!(s.next_for_app(a, "x").unwrap().0, c);
+        assert!(s.next_for_app(c, "x").is_none());
         assert_eq!(s.messages("dm:010203040506", None, 10).len(), 3);
     }
 

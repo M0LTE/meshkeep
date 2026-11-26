@@ -70,6 +70,7 @@ pub struct RigOpts {
     pub before_start: BeforeStart,
     pub dir: Option<PathBuf>,
     pub auth: bool,
+    pub mirror_sent: bool,
 }
 
 impl Default for RigOpts {
@@ -79,6 +80,7 @@ impl Default for RigOpts {
             before_start: Box::new(|_, _, _| {}),
             dir: None,
             auth: true,
+            mirror_sent: true,
         }
     }
 }
@@ -105,6 +107,7 @@ impl Rig {
             web_bind: Some("127.0.0.1:0".parse().unwrap()),
             password: Some(PASSWORD.into()),
             auth: o.auth,
+            mirror_sent: o.mirror_sent,
         };
         let mk = meshkeep::start(cfg, clock.clone())
             .await

@@ -54,6 +54,8 @@ pub struct Config {
     pub web_bind: Option<SocketAddr>,
     pub password: Option<String>,
     pub auth: bool,
+    /// Show messages sent from one client (web or app) in the other apps.
+    pub mirror_sent: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -61,6 +63,7 @@ pub struct Config {
 struct FileConfig {
     radio: Option<String>,
     data_dir: Option<PathBuf>,
+    mirror_sent: Option<bool>,
     #[serde(default)]
     listener: Vec<FileListener>,
     web: Option<FileWeb>,
@@ -189,6 +192,7 @@ impl Config {
             web_bind,
             password,
             auth,
+            mirror_sent: file.mirror_sent.unwrap_or(true),
         })
     }
 
@@ -236,6 +240,7 @@ mod tests {
             &p,
             r#"
 radio = "/dev/ttyUSB0"
+mirror_sent = false
 data_dir = "/var/lib/meshkeep"
 [[listener]]
 name = "phone"
@@ -253,6 +258,7 @@ password = "pw"
         let c = Config::load(Some(&p), Overrides::default()).unwrap();
         assert_eq!(c.listeners.len(), 2);
         assert!(c.listeners[1].per_address);
+        assert!(!c.mirror_sent);
         assert_eq!(c.listeners[1].bind.port(), 5001);
         assert!(c.check().is_ok());
         let c = Config::load(
@@ -281,5 +287,6 @@ password = "pw"
         .unwrap();
         assert!(c.check().unwrap_err().contains("password"));
         assert_eq!(c.listeners[0].bind.port(), 5000);
+        assert!(c.mirror_sent);
     }
 }

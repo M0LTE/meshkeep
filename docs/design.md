@@ -106,6 +106,18 @@ Sends from the web go through the same queue as app commands. Status runs `sendi
 
 Limits follow the firmware: 160 bytes of text for a DM; for a channel, 160 minus the node name and ": ".
 
+## Sent messages in other apps
+
+The companion protocol has no frame for "a message was sent from somewhere else", so a message sent from the web or from one app never shows up in the other apps. With `mirror_sent` on (the default), meshkeep fakes it: once the radio has accepted a plain text send (`RESP_CODE_SENT` for a DM, `RESP_CODE_OK` for a channel), it stores a mirror frame that goes out through the normal sync path to every client except the one that sent it (the web is never a sync client, so a web send reaches all apps).
+
+- Channel message: a received channel message on that channel index, with the text the firmware actually puts on air, `<own node name>: <text>` (cut to 160 bytes as the firmware does), so the app shows it under your own name.
+- DM to contact X: a received DM from X's key prefix with the text `You: <text>`. The app files it in X's conversation as if X had written it; the prefix makes clear it is yours.
+- Timestamp is the one in the send command, SNR 0, `path_len` 0xFF (the firmware's value for a message that was not flooded, shown as direct).
+- Layout follows each app's announced version (v3 or legacy), as for received messages.
+- Only plain text is mirrored: not CLI or command text, signed, raw or binary sends, and not refused sends. An app retry of the same DM is not mirrored twice.
+
+Mirrors are stored as their own rows (direction `mirror`, with the sending client's key) and never appear in the web view, which shows the real sent message.
+
 ## Radio away
 
 Apps stay connected when the radio link drops. While it is down:

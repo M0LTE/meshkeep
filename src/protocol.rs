@@ -685,6 +685,57 @@ pub fn frame_for_app(frame_v3: &[u8], app_target_ver: u8) -> Vec<u8> {
     v
 }
 
+/// `path_len` given to mirrored sent messages: the firmware's value for a
+/// message that was not flooded, which the app shows as direct.
+pub const MIRROR_PATH_LEN: u8 = 0xff;
+
+/// Cut text so the whole frame fits `MAX_FRAME_SIZE`, on a UTF-8 boundary.
+fn fit_text(head_len: usize, text: &[u8]) -> &[u8] {
+    let room = MAX_FRAME_SIZE.saturating_sub(head_len).min(text.len());
+    let t = &text[..room];
+    match std::str::from_utf8(t) {
+        Ok(_) => t,
+        Err(e) if e.error_len().is_none() => &t[..e.valid_up_to()],
+        Err(_) => t,
+    }
+}
+
+/// A sent channel message dressed as a received one (v3 layout), with the
+/// text the firmware puts on air: `<node name>: <text>`, cut to `MAX_TEXT_LEN`.
+pub fn mirror_channel_frame(idx: u8, ts: u32, node_name: &str, text: &[u8]) -> Vec<u8> {
+    let mut body = format!("{node_name}: ").into_bytes();
+    let room = MAX_TEXT_LEN.saturating_sub(body.len()).min(text.len());
+    body.extend_from_slice(&text[..room]);
+    let mut f = vec![
+        resp::CHANNEL_MSG_RECV_V3,
+        0,
+        0,
+        0,
+        idx,
+        MIRROR_PATH_LEN,
+        txt::PLAIN,
+    ];
+    f.extend_from_slice(&ts.to_le_bytes());
+    let t = fit_text(f.len(), &body).to_vec();
+    f.extend_from_slice(&t);
+    f
+}
+
+/// A DM we sent to `prefix`, dressed as a received one from them with the
+/// text marked `You: ` (v3 layout).
+pub fn mirror_dm_frame(prefix: &[u8; 6], ts: u32, text: &[u8]) -> Vec<u8> {
+    let mut f = vec![resp::CONTACT_MSG_RECV_V3, 0, 0, 0];
+    f.extend_from_slice(prefix);
+    f.push(MIRROR_PATH_LEN);
+    f.push(txt::PLAIN);
+    f.extend_from_slice(&ts.to_le_bytes());
+    let mut body = b"You: ".to_vec();
+    body.extend_from_slice(text);
+    let t = fit_text(f.len(), &body).to_vec();
+    f.extend_from_slice(&t);
+    f
+}
+
 /// Build `CMD_SEND_TXT_MSG`.
 pub fn build_send_txt(prefix: &[u8; 6], ts: u32, attempt: u8, text: &str) -> Vec<u8> {
     let mut v = vec![cmd::SEND_TXT_MSG, txt::PLAIN, attempt];
@@ -864,6 +915,23 @@ mod tests {
         );
         assert!(restarts_radio(&cli("reboot")));
         assert!(!restarts_radio(&[cmd::REBOOT, b'x']));
+    }
+
+    #[test]
+    fn mirrors_fit_and_parse() {
+        let long = "\u{e9}".repeat(100);
+        let f = mirror_dm_frame(&[1, 2, 3, 4, 5, 6], 7, long.as_bytes());
+        assert!(f.len() <= MAX_FRAME_SIZE);
+        let m = parse_inbound(&f).unwrap();
+        assert_eq!(m.kind, MsgKind::Direct);
+        assert!(m.text.starts_with("You: "));
+        assert!(!m.text.contains('\u{fffd}'));
+        let c = mirror_channel_frame(2, 9, "Node", b"hi");
+        let m = parse_inbound(&c).unwrap();
+        assert_eq!(
+            (m.channel, m.text.as_str(), m.sender_ts),
+            (Some(2), "Node: hi", 9)
+        );
     }
 
     #[test]

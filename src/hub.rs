@@ -170,6 +170,8 @@ pub struct Hub {
     store_retry_at: u64,
     /// A legacy layout frame already triggered a re-handshake.
     rehandshaked: bool,
+    /// Show messages sent by one client to the other apps.
+    mirror_sent: bool,
     ack_deadlines: Vec<(i64, u64)>,
     clients: HashMap<ConnId, Client>,
 }
@@ -181,8 +183,10 @@ impl Hub {
         events: broadcast::Sender<Event>,
         status: SharedStatus,
         kick: mpsc::UnboundedSender<()>,
+        mirror_sent: bool,
     ) -> Hub {
         Hub {
+            mirror_sent,
             clock,
             store,
             events,
@@ -939,7 +943,7 @@ impl Hub {
         if f[0] == cmd::SYNC_NEXT_MESSAGE {
             let c = self.clients.get_mut(&conn)?;
             let pos = self.store.cursor(&c.key).unwrap_or(0);
-            return Some(vec![match self.store.next_for_app(pos) {
+            return Some(vec![match self.store.next_for_app(pos, &c.key) {
                 Some((id, frame)) => {
                     c.unacked = Some(id);
                     p::frame_for_app(&frame, c.app_ver)
@@ -983,7 +987,7 @@ impl Hub {
     }
 
     /// Record messages apps send through us, so the web UI shows them.
-    fn client_result(&mut self, _conn: ConnId, cmd_frame: &[u8], f: &[u8]) {
+    fn client_result(&mut self, conn: ConnId, cmd_frame: &[u8], f: &[u8]) {
         match (cmd_frame[0], f[0]) {
             (cmd::SEND_TXT_MSG, resp::SENT) => {
                 let (Some((txt_type, _attempt, ts, prefix, text)), Some((_, ack, timeout))) =
@@ -996,8 +1000,11 @@ impl Hub {
                 }
                 let conv = store::conv_dm(&prefix);
                 let id = match self.store.find_outbound_dm(&conv, ts, &text) {
+                    // An app retry: already recorded and mirrored.
                     Some(id) => id,
                     None => {
+                        let key = self.clients.get(&conn).map(|c| c.key.clone());
+                        self.mirror(cmd_frame, key);
                         let name = self.status.lock().unwrap().name.clone();
                         match self.store.insert_outbound(
                             &conv,
@@ -1022,9 +1029,14 @@ impl Hub {
                 self.mark_sent(id, ack, timeout);
             }
             (cmd::SEND_CHANNEL_TXT_MSG, resp::OK) => {
-                let Some((_, idx, ts, text)) = p::parse_send_channel_cmd(cmd_frame) else {
+                let Some((txt_type, idx, ts, text)) = p::parse_send_channel_cmd(cmd_frame) else {
                     return;
                 };
+                if txt_type != p::txt::PLAIN {
+                    return;
+                }
+                let key = self.clients.get(&conn).map(|c| c.key.clone());
+                self.mirror(cmd_frame, key);
                 let name = self.status.lock().unwrap().name.clone();
                 let ch = self.store.channel_name(idx);
                 if let Ok(id) = self.store.insert_outbound(
@@ -1042,6 +1054,66 @@ impl Hub {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Queue a sent plain text message for every app except `origin` (the
+    /// client that sent it; `None` for the web), dressed as a received
+    /// message: the protocol has no way to tell an app about a message sent
+    /// elsewhere. Call only once the radio has accepted the send.
+    fn mirror(&mut self, cmd_frame: &[u8], origin: Option<String>) {
+        if !self.mirror_sent {
+            return;
+        }
+        let (conv, kind, frame) = match cmd_frame[0] {
+            cmd::SEND_TXT_MSG => {
+                let Some((txt_type, _, ts, prefix, _)) = p::parse_send_txt_cmd(cmd_frame) else {
+                    return;
+                };
+                if txt_type != p::txt::PLAIN {
+                    return;
+                }
+                (
+                    store::conv_dm(&prefix),
+                    p::MsgKind::Direct,
+                    p::mirror_dm_frame(&prefix, ts, &cmd_frame[13..]),
+                )
+            }
+            cmd::SEND_CHANNEL_TXT_MSG => {
+                let Some((txt_type, idx, ts, _)) = p::parse_send_channel_cmd(cmd_frame) else {
+                    return;
+                };
+                if txt_type != p::txt::PLAIN {
+                    return;
+                }
+                let name = self.status.lock().unwrap().name.clone().unwrap_or_default();
+                (
+                    store::conv_channel(idx),
+                    p::MsgKind::Channel,
+                    p::mirror_channel_frame(idx, ts, &name, &cmd_frame[7..]),
+                )
+            }
+            _ => return,
+        };
+        match self.store.insert_mirror(
+            &conv,
+            kind,
+            self.clock.now_unix(),
+            &frame,
+            origin.as_deref(),
+        ) {
+            Ok(_) => {
+                let conns: Vec<ConnId> = self
+                    .clients
+                    .iter()
+                    .filter(|(_, c)| Some(&c.key) != origin.as_ref())
+                    .map(|(id, _)| *id)
+                    .collect();
+                for c in conns {
+                    self.send_to(c, vec![push::MSG_WAITING]);
+                }
+            }
+            Err(e) => warn!("cannot store copy of sent message for other apps: {e}"),
         }
     }
 
@@ -1148,10 +1220,14 @@ impl Hub {
         match (cmd_frame[0], f[0]) {
             (cmd::SEND_TXT_MSG, resp::SENT) => {
                 if let Some((_, ack, timeout)) = p::parse_sent(f) {
+                    self.mirror(cmd_frame, None);
                     self.mark_sent(id, ack, timeout);
                 }
             }
-            (cmd::SEND_CHANNEL_TXT_MSG, resp::OK) => self.set_status(id, "sent"),
+            (cmd::SEND_CHANNEL_TXT_MSG, resp::OK) => {
+                self.mirror(cmd_frame, None);
+                self.set_status(id, "sent");
+            }
             _ => self.set_status(id, "failed"),
         }
     }

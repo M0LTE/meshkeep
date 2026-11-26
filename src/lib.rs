@@ -128,6 +128,7 @@ pub async fn start(cfg: Config, clock: SharedClock) -> Result<Running, String> {
         events.clone(),
         status.clone(),
         kick_tx,
+        cfg.mirror_sent,
     );
     tasks.push(tokio::spawn(hub.run(hub_rx)));
     tasks.push(tokio::spawn(radio::run(radio, clock, hub_tx, kick_rx)));
