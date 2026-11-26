@@ -633,7 +633,11 @@ impl Hub {
             }
             if radio.send(frame).is_err() {
                 // Radio task is gone; RadioDown will follow.
-                self.client_q.push_front(c);
+                if use_internal {
+                    self.internal_q.push_front(c);
+                } else {
+                    self.client_q.push_front(c);
+                }
                 return;
             }
             let expect = p::expect_for(&c.frame);
