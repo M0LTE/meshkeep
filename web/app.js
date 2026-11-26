@@ -448,5 +448,25 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 
+// iOS keeps the layout full height under the keyboard and scrolls the page
+// instead, pushing the header off screen. Size the app to what is visible.
+if (window.visualViewport) {
+  const vv = window.visualViewport;
+  const box = $("messages");
+  let atEnd = true;
+  box.addEventListener("scroll", () => {
+    atEnd = box.scrollHeight - box.scrollTop - box.clientHeight < 80;
+  });
+  const fit = () => {
+    const keep = atEnd;
+    document.documentElement.style.setProperty("--app-h", vv.height + "px");
+    if (window.scrollY) window.scrollTo(0, 0);
+    if (keep) box.scrollTop = box.scrollHeight;
+  };
+  vv.addEventListener("resize", fit);
+  vv.addEventListener("scroll", fit);
+  fit();
+}
+
 loadState().catch(() => {});
 connect();

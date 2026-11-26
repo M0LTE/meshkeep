@@ -40,6 +40,8 @@
 html, body { margin: 0; height: 100%; }
 body { overflow: hidden; }
 button, input, textarea { font: inherit; color: inherit; }
+/* iOS zooms the page into any field under 16px and leaves it zoomed. */
+input, textarea { font-size: 16px; }
 button {
   border: 0; border-radius: 10px; padding: 8px 14px; cursor: pointer;
   background: var(--accent); color: var(--accent-text); font-weight: 600;
@@ -48,7 +50,7 @@ button:disabled { opacity: .5; cursor: default; }
 button.ghost { background: transparent; color: var(--muted); font-weight: 500; padding: 6px 10px; }
 button.ghost:hover { background: var(--hover); color: var(--text); }
 
-.app { display: grid; grid-template-columns: 320px 1fr; height: 100dvh; }
+.app { display: grid; grid-template-columns: 320px 1fr; height: var(--app-h, 100dvh); }
 .side { display: flex; flex-direction: column; background: var(--panel); border-right: 1px solid var(--line); min-height: 0; }
 .bar {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
