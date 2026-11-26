@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# meshkeep configuration. See https://github.com/packet-net/meshkeep
+# meshkeep configuration. See https://github.com/M0LTE/meshkeep
 # Restart after changes: sudo systemctl restart meshkeep
 
 # The companion radio: host or host:port for a WiFi companion (port 5000 by

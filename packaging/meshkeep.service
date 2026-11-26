@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 [Unit]
 Description=meshkeep, storing proxy and web client for a MeshCore companion radio
-Documentation=https://github.com/packet-net/meshkeep
+Documentation=https://github.com/M0LTE/meshkeep
 After=network-online.target
 Wants=network-online.target
 

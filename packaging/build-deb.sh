@@ -41,7 +41,7 @@ Installed-Size: $size
 Depends: adduser
 Section: net
 Priority: optional
-Homepage: https://github.com/packet-net/meshkeep
+Homepage: https://github.com/M0LTE/meshkeep
 Description: storing proxy and web client for MeshCore companion radios
  meshkeep keeps a permanent connection to a MeshCore companion radio, stores
  every message it receives, and lets several MeshCore apps and web browsers

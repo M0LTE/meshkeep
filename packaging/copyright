@@ -1,6 +1,6 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: meshkeep
-Source: https://github.com/packet-net/meshkeep
+Source: https://github.com/M0LTE/meshkeep
 
 Files: *
 Copyright: meshkeep contributors
