@@ -1,1 +1,47 @@
-
+<!doctype html>
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#0f766e">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>meshkeep</title>
+<link rel="icon" href="/icon.svg">
+<link rel="apple-touch-icon" href="/icon.svg">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body data-auth="{{AUTH}}">
+<div id="app" class="app">
+  <aside class="side">
+    <header class="bar">
+      <div class="node">
+        <span id="radio-dot" class="dot" title="Radio"></span>
+        <div class="node-text">
+          <strong id="node-name">meshkeep</strong>
+          <small id="node-sub">Connecting</small>
+        </div>
+      </div>
+      <form method="post" action="/logout" id="logout-form"><button class="ghost" type="submit">Sign out</button></form>
+    </header>
+    <div class="search"><input id="filter" type="search" placeholder="Search" autocomplete="off"></div>
+    <nav id="list" class="list" aria-label="Conversations"></nav>
+  </aside>
+  <main class="chat" id="chat">
+    <header class="bar chat-bar">
+      <button class="ghost back" id="back" aria-label="Back">&larr;</button>
+      <div class="chat-title"><strong id="chat-name"></strong><small id="chat-sub"></small></div>
+    </header>
+    <div class="empty" id="empty">Pick a conversation</div>
+    <div class="messages" id="messages" aria-live="polite"></div>
+    <form class="composer" id="composer" autocomplete="off">
+      <textarea id="text" rows="1" placeholder="Message" enterkeyhint="send"></textarea>
+      <span id="count" class="count"></span>
+      <button type="submit" id="send">Send</button>
+    </form>
+  </main>
+</div>
+<script src="/app.js"></script>
+</body>
+</html>

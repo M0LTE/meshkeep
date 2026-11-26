@@ -63,9 +63,11 @@ pub fn listeners(names: &[(&str, bool)]) -> Vec<Listener> {
         .collect()
 }
 
+pub type BeforeStart = Box<dyn FnOnce(&SimRadio, &SimContact, &SimContact)>;
+
 pub struct RigOpts {
     pub listeners: Vec<Listener>,
-    pub before_start: Box<dyn FnOnce(&SimRadio, &SimContact, &SimContact)>,
+    pub before_start: BeforeStart,
     pub dir: Option<PathBuf>,
 }
 
