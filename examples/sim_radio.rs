@@ -27,7 +27,7 @@ async fn main() {
     loop {
         tokio::time::sleep(Duration::from_secs(20)).await;
         n += 1;
-        if n % 2 == 0 {
+        if n.is_multiple_of(2) {
             sim.receive_dm(&bob, 1_700_000_300 + n, &format!("Test message {n}"));
         } else {
             sim.receive_channel(1, 1_700_000_300 + n, &format!("Erin: Checking in, {n}"));
