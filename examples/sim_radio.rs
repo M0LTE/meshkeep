@@ -9,7 +9,9 @@ use meshkeep::sim::{SimContact, SimRadio};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    let bind = std::env::args().nth(1).unwrap_or_else(|| "127.0.0.1:5050".into());
+    let bind = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "127.0.0.1:5050".into());
     let sim = SimRadio::start_on(&bind).await;
     let alice = SimContact::new(1, "Alice");
     let bob = SimContact::new(2, "Bob");
