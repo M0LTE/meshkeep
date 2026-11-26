@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # meshkeep configuration. See https://github.com/packet-net/meshkeep
 # Restart after changes: sudo systemctl restart meshkeep
 

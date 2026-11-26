@@ -1,7 +1,12 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 [package]
 name = "meshkeep"
 version = "0.1.0"
 edition = "2024"
+description = "Always-on storing proxy and web client for MeshCore companion radios"
+license = "AGPL-3.0-or-later"
+repository = "https://github.com/packet-net/meshkeep"
+readme = "README.md"
 
 [dependencies]
 axum = { version = "0.8.9", features = ["ws"] }
@@ -20,3 +25,8 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 [dev-dependencies]
 reqwest = { version = "0.13.5", default-features = false, features = ["json", "form"] }
 tokio-tungstenite = "0.30.0"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
