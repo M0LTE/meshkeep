@@ -16,6 +16,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::{debug, info, warn};
 
 use crate::clock::SharedClock;
+use crate::crypto;
 use crate::protocol::{self as p, Expect, cmd, err, push, resp};
 use crate::store::{self, Message, Store};
 
@@ -27,6 +28,10 @@ pub const RADIO_WAIT: Duration = Duration::from_secs(3);
 pub const DRAIN_INTERVAL: Duration = Duration::from_secs(60);
 /// Grace on top of the radio's own ack timeout estimate.
 pub const ACK_GRACE: Duration = Duration::from_secs(5);
+/// How long after a channel send repeats of it are still counted.
+pub const HEARD_WINDOW: Duration = Duration::from_secs(30 * 60);
+/// Channel sends tracked for repeats at once.
+const HEARD_TRACKED: usize = 64;
 /// How soon to try again after a message could not be stored.
 pub const STORE_RETRY: Duration = Duration::from_secs(5);
 /// Back-to-back response timeouts before the radio link is restarted.
@@ -38,6 +43,20 @@ const OWN_APP_VER: u8 = 3;
 pub const CLIENT_QUEUE: usize = 1024;
 
 pub type ConnId = u64;
+
+/// Secrets of every configured channel slot.
+fn channel_keys(store: &Store) -> Vec<crypto::ChannelKey> {
+    store
+        .channel_frames()
+        .iter()
+        .filter(|f| f.len() >= 50 && f[34..50].iter().any(|&b| b != 0))
+        .map(|f| {
+            let mut secret = [0u8; 16];
+            secret.copy_from_slice(&f[34..50]);
+            crypto::ChannelKey::new(f[1], secret)
+        })
+        .collect()
+}
 
 pub enum HubMsg {
     RadioUp {
@@ -89,6 +108,11 @@ pub enum Event {
     MessageStatus {
         id: i64,
         status: String,
+    },
+    /// The radio heard a repeater pass on a sent channel message.
+    MessageHeard {
+        id: i64,
+        heard: u32,
     },
     Contacts,
     Channels,
@@ -168,10 +192,17 @@ pub struct Hub {
     /// more are taken: the radio's queue is destructive.
     unstored: VecDeque<p::InboundMessage>,
     store_retry_at: u64,
-    /// A legacy layout frame already triggered a re-handshake.
+    /// Not watching for legacy frames: during the first drain after a connect
+    /// (messages queued before meshkeep set the version are legitimately in
+    /// the old layout), or once a legacy frame has already triggered a
+    /// re-handshake.
     rehandshaked: bool,
     /// Show messages sent by one client to the other apps.
     mirror_sent: bool,
+    /// Channel secrets, for reading repeats of our own channel messages.
+    channel_keys: Vec<crypto::ChannelKey>,
+    /// Recent channel sends: (message id, channel, timestamp, text on air, sent at ms).
+    recent_sends: VecDeque<(i64, u8, u32, Vec<u8>, u64)>,
     ack_deadlines: Vec<(i64, u64)>,
     clients: HashMap<ConnId, Client>,
 }
@@ -185,8 +216,11 @@ impl Hub {
         kick: mpsc::UnboundedSender<()>,
         mirror_sent: bool,
     ) -> Hub {
+        let channel_keys = channel_keys(&store);
         Hub {
             mirror_sent,
+            channel_keys,
+            recent_sends: VecDeque::new(),
             clock,
             store,
             events,
@@ -300,7 +334,7 @@ impl Hub {
         self.internal_q.clear();
         self.draining = false;
         self.next_drain_at = self.now() + DRAIN_INTERVAL.as_millis() as u64;
-        self.rehandshaked = false;
+        self.rehandshaked = true;
         self.status.lock().unwrap().radio_connected = true;
 
         for c in self.session_setup() {
@@ -535,6 +569,7 @@ impl Hub {
             }
             resp::CHANNEL_INFO => {
                 self.store.upsert_channel(f);
+                self.channel_keys = channel_keys(&self.store);
                 self.emit(Event::Channels);
             }
             resp::OK => match sent {
@@ -583,6 +618,8 @@ impl Hub {
             return;
         }
         self.draining = false;
+        // Anything queued before this connect is out now.
+        self.rehandshaked = false;
         if self.drain_again {
             self.schedule_drain();
         } else {
@@ -682,6 +719,9 @@ impl Hub {
                         status: "delivered".into(),
                     });
                 }
+            }
+            push::LOG_RX_DATA if f.len() > 3 && !self.recent_sends.is_empty() => {
+                self.count_repeat(&f[3..]);
             }
             push::NEW_ADVERT => {
                 self.store.upsert_contact(&f);
@@ -1048,13 +1088,60 @@ impl Hub {
                     &text,
                     "sent",
                     ch.as_deref(),
-                ) && let Some(m) = self.store.message(id)
-                {
-                    self.emit(Event::Message { message: m });
+                ) {
+                    self.track_channel_send(id, cmd_frame);
+                    if let Some(m) = self.store.message(id) {
+                        self.emit(Event::Message { message: m });
+                    }
                 }
             }
             _ => {}
         }
+    }
+
+    /// Track a channel send so repeats the radio hears can be counted.
+    fn track_channel_send(&mut self, id: i64, cmd_frame: &[u8]) {
+        let Some((_, idx, ts, _)) = p::parse_send_channel_cmd(cmd_frame) else {
+            return;
+        };
+        let name = self.status.lock().unwrap().name.clone().unwrap_or_default();
+        // What the firmware puts on air: "<name>: <text>", cut to MAX_TEXT_LEN.
+        let mut on_air = format!("{name}: ").into_bytes();
+        let room = p::MAX_TEXT_LEN.saturating_sub(on_air.len());
+        let text = &cmd_frame[7..];
+        on_air.extend_from_slice(&text[..room.min(text.len())]);
+        self.recent_sends
+            .push_back((id, idx, ts, on_air, self.now()));
+        while self.recent_sends.len() > HEARD_TRACKED {
+            self.recent_sends.pop_front();
+        }
+    }
+
+    /// A packet from the radio's RX log: is it a repeat of a channel message
+    /// we sent? Every copy heard counts, as in the app.
+    fn count_repeat(&mut self, raw: &[u8]) {
+        let cutoff = self.now().saturating_sub(HEARD_WINDOW.as_millis() as u64);
+        self.recent_sends.retain(|s| s.4 >= cutoff);
+        let Some(g) = crypto::read_group_text(raw, &self.channel_keys) else {
+            return;
+        };
+        let name = self.status.lock().unwrap().name.clone().unwrap_or_default();
+        let own = format!("{name}: ").into_bytes();
+        if !g.text.starts_with(&own) {
+            return;
+        }
+        let mut same = self
+            .recent_sends
+            .iter()
+            .rev()
+            .filter(|s| s.1 == g.idx && s.2 == g.timestamp);
+        let first = same.clone().next().map(|s| s.0);
+        // Two sends in the same second: the text decides.
+        let Some(id) = same.find(|s| s.3 == g.text).map(|s| s.0).or(first) else {
+            return;
+        };
+        let heard = self.store.add_heard(id);
+        self.emit(Event::MessageHeard { id, heard });
     }
 
     /// Queue a sent plain text message for every app except `origin` (the
@@ -1226,6 +1313,7 @@ impl Hub {
             }
             (cmd::SEND_CHANNEL_TXT_MSG, resp::OK) => {
                 self.mirror(cmd_frame, None);
+                self.track_channel_send(id, cmd_frame);
                 self.set_status(id, "sent");
             }
             _ => self.set_status(id, "failed"),

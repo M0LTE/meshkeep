@@ -5,6 +5,7 @@
 pub mod clients;
 pub mod clock;
 pub mod config;
+pub mod crypto;
 pub mod hub;
 pub mod protocol;
 pub mod radio;

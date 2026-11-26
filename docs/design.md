@@ -118,6 +118,20 @@ The companion protocol has no frame for "a message was sent from somewhere else"
 
 Mirrors are stored as their own rows (direction `mirror`, with the sending client's key) and never appear in the web view, which shows the real sent message.
 
+## Repeats of sent channel messages
+
+The app shows a sent channel message as heard repeated once the radio hears repeaters pass it on. meshkeep does the same for the web view, for channel messages sent from the web and from apps.
+
+The firmware pushes every packet it receives as `PUSH_CODE_LOG_RX_DATA` (SNR, RSSI, raw packet), duplicates included and with nothing to enable; apps still get these pushes unchanged. For each one meshkeep reads the packet (`Packet::readFrom`: header, optional transport codes, path, payload). If it is group text (`PAYLOAD_TYPE_GRP_TXT`) for a channel it knows, it checks the 2 byte HMAC-SHA256 and decrypts it with the channel secret (AES-128-ECB, `Utils::MACThenDecrypt`). The secrets come from `RESP_CODE_CHANNEL_INFO`. A decrypted message whose timestamp and channel match one of our sends from the last 30 minutes, and whose text starts with our node name, is a repeat; the exact text decides between two sends in the same second. Every copy heard counts, as in the app, so the number grows with each repeater that is heard.
+
+The web shows "Heard 1 repeat" or "Heard N repeats" in place of "Sent", updated live. DMs have delivery acks instead and are not counted.
+
+## Contact types and rooms
+
+The web sidebar groups contacts by the type in the contact record: chat nodes under Direct, room servers under Rooms. Repeaters and sensors are not chat targets and only appear, under Repeaters, once a conversation with them exists.
+
+Room servers forward posts as signed DMs (`TXT_TYPE_SIGNED_PLAIN`): the first 4 bytes of the text are the author's key prefix. meshkeep stores the prefix as the sender and the web shows the author's name when the prefix matches a contact, otherwise the hex prefix. A room server only forwards posts to clients that are logged in to it; logging in to rooms from the web is not supported yet, so do that from an app.
+
 ## Radio away
 
 Apps stay connected when the radio link drops. While it is down:

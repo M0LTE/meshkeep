@@ -54,6 +54,9 @@ async fn drains_queue_present_at_startup() {
     })
     .await;
     assert_eq!(rig.sim.queue_len(), 0);
+    // Old-layout frames queued before meshkeep connected are no reason to
+    // set the radio up again.
+    assert_eq!(rig.sim.count(cmd::DEVICE_QUERY), 1);
     let dm = rig
         .mk
         .store
@@ -613,4 +616,23 @@ async fn late_sync_answer_is_stored_whatever_is_in_flight() {
     rig.sim.release();
     assert_eq!(a.response().await[0], resp::BATT_AND_STORAGE);
     rig.wait_event(|e| matches!(e, Event::DrainDone)).await;
+}
+
+#[tokio::test]
+async fn room_posts_keep_their_author() {
+    let mut rig = Rig::start().await;
+    let room = meshkeep::sim::SimContact::new(9, "Hilltop Room");
+    rig.sim.receive_room_post(
+        &room,
+        &rig.bob.pubkey[..4].try_into().unwrap(),
+        3,
+        "meet at noon",
+    );
+    let e = rig.wait_event(|e| matches!(e, Event::Message { .. })).await;
+    let Event::Message { message } = e else {
+        unreachable!()
+    };
+    assert_eq!(message.text, "meet at noon");
+    assert_eq!(message.sender, Some(p::hex(&rig.bob.pubkey[..4])));
+    assert_eq!(message.conv, format!("dm:{}", p::hex(&room.prefix())));
 }

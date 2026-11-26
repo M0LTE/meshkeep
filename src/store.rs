@@ -34,6 +34,8 @@ pub struct Message {
     pub txt_type: u8,
     pub status: Option<String>,
     pub channel_name: Option<String>,
+    /// Times the radio heard a repeater pass on this sent channel message.
+    pub heard: u32,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -130,10 +132,11 @@ fn row_to_message(r: &rusqlite::Row) -> rusqlite::Result<Message> {
         txt_type: r.get::<_, i64>(10)? as u8,
         status: r.get(11)?,
         channel_name: r.get(12)?,
+        heard: r.get::<_, Option<i64>>(13)?.unwrap_or(0) as u32,
     })
 }
 
-const MSG_COLS: &str = "id, conv, direction, kind, received_at, sender_ts, sender, text, snr, path_len, txt_type, status, channel_name";
+const MSG_COLS: &str = "id, conv, direction, kind, received_at, sender_ts, sender, text, snr, path_len, txt_type, status, channel_name, heard";
 
 impl Store {
     pub fn open(path: &Path) -> rusqlite::Result<Store> {
@@ -155,6 +158,12 @@ impl Store {
             .exists([])?;
         if !has_origin {
             conn.execute_batch("ALTER TABLE messages ADD COLUMN origin_client TEXT")?;
+        }
+        let has_heard: bool = conn
+            .prepare("SELECT 1 FROM pragma_table_info('messages') WHERE name = 'heard'")?
+            .exists([])?;
+        if !has_heard {
+            conn.execute_batch("ALTER TABLE messages ADD COLUMN heard INTEGER NOT NULL DEFAULT 0")?;
         }
         Ok(Store {
             conn: Arc::new(Mutex::new(conn)),
@@ -187,7 +196,17 @@ impl Store {
         channel_name: Option<&str>,
     ) -> rusqlite::Result<i64> {
         let (conv, sender, text) = match m.kind {
-            MsgKind::Direct => (conv_dm(&m.prefix.unwrap_or_default()), None, m.text.clone()),
+            MsgKind::Direct => {
+                // Room server posts are signed: the author's key prefix
+                // comes before the text.
+                let author = (m.txt_type == protocol::txt::SIGNED_PLAIN && m.frame_v3.len() >= 20)
+                    .then(|| protocol::hex(&m.frame_v3[16..20]));
+                (
+                    conv_dm(&m.prefix.unwrap_or_default()),
+                    author,
+                    m.text.clone(),
+                )
+            }
             MsgKind::Channel => {
                 let idx = m.channel.unwrap_or(0);
                 // Channel text arrives as "<sender name>: <text>".
@@ -268,6 +287,21 @@ impl Store {
                 params![id, status],
             ),
         };
+    }
+
+    /// Count one more heard repeat of a sent message. Returns the new count.
+    pub fn add_heard(&self, id: i64) -> u32 {
+        let db = self.db();
+        let _ = db.execute(
+            "UPDATE messages SET heard = heard + 1 WHERE id = ?1",
+            params![id],
+        );
+        db.query_row(
+            "SELECT heard FROM messages WHERE id = ?1",
+            params![id],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0) as u32
     }
 
     /// Mark the outgoing message waiting for this ack as delivered.
@@ -545,6 +579,17 @@ impl Store {
             .optional()
             .ok()
             .flatten()
+    }
+
+    /// Every cached `RESP_CODE_CHANNEL_INFO` frame.
+    pub fn channel_frames(&self) -> Vec<Vec<u8>> {
+        let db = self.db();
+        let mut st = db
+            .prepare("SELECT frame FROM channels ORDER BY idx")
+            .expect("prepare");
+        st.query_map([], |r| r.get(0))
+            .map(|it| it.filter_map(Result::ok).collect())
+            .unwrap_or_default()
     }
 
     pub fn channel_name(&self, idx: u8) -> Option<String> {

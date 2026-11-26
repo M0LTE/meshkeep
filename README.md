@@ -72,7 +72,7 @@ If you would rather use one port for several devices with fixed addresses, set `
 
 ## Web interface
 
-Open `http://<machine>:8080`. It works on phones, tablets and desktops: channels and direct conversations on the left, full history, sending, and delivery status (sent, delivered, not confirmed). Every open browser updates live.
+Open `http://<machine>:8080`. It works on phones, tablets and desktops: channels, direct conversations and rooms on the left, full history, sending, and delivery status (delivered for DMs, repeats heard for channel messages). Every open browser updates live.
 
 Sign-in uses the single password from the config. On a network you fully trust you can set `auth = false` under `[web]` instead; then the interface only answers when reached by IP address or a local name (such as `pi`, `meshkeep.local` or `meshkeep.lan`).
 
@@ -84,6 +84,7 @@ Sign-in uses the single password from the config. On a network you fully trust y
 - A device first seen on a `per_address` listener gets at most the 100 most recent messages from before it connected.
 - Some radio settings are per session in the firmware (flood scope, message signing). With several apps connected they share them.
 - Replies to requests such as repeater logins and status queries go to every connected app, as the radio sends them without saying who asked.
+- Room servers only forward posts to logged-in clients, and the web interface cannot log in to rooms yet; log in from an app.
 - While the radio is unreachable, apps can still connect, sync stored messages and read contacts and channels; anything that needs the radio fails after 3 seconds.
 
 ## Docker

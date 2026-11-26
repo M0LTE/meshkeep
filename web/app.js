@@ -123,6 +123,10 @@ function renderHeader() {
   if (document.body.dataset.auth !== "1") $("logout-form").hidden = true;
 }
 
+// Contact types (ADV_TYPE_*): 1 chat, 2 repeater, 3 room server, 4 sensor.
+const KIND_CHAT = 1;
+const KIND_ROOM = 3;
+
 function rows() {
   const last = new Map(S.conversations.map((c) => [c.conv, c]));
   const chans = S.channels.map((c) => ({ conv: "ch:" + c.idx, name: c.name, last: last.get("ch:" + c.idx) }));
@@ -131,25 +135,34 @@ function rows() {
       chans.push({ conv: c.conv, name: convName(c.conv), last: c });
     }
   }
-  const dms = new Map();
+  const direct = new Map();
+  const rooms = new Map();
+  const others = new Map();
+  const groupFor = (kind) => (kind === KIND_ROOM ? rooms : kind === KIND_CHAT ? direct : others);
   for (const c of S.conversations) {
-    if (c.conv.startsWith("dm:")) dms.set(c.conv, { conv: c.conv, name: convName(c.conv), last: c });
+    if (!c.conv.startsWith("dm:")) continue;
+    const ct = contactFor(c.conv);
+    // Unknown senders are treated as people.
+    groupFor(ct ? ct.kind : KIND_CHAT).set(c.conv, { conv: c.conv, name: convName(c.conv), last: c });
   }
   for (const c of S.contacts) {
     const conv = "dm:" + c.prefix;
-    // Chat nodes and room servers take messages; others only if already talked to.
-    if (!dms.has(conv) && (c.kind === 1 || c.kind === 3)) dms.set(conv, { conv, name: c.name, last: null });
+    // Repeaters and sensors only appear once there is a conversation.
+    if (c.kind !== KIND_CHAT && c.kind !== KIND_ROOM) continue;
+    const g = groupFor(c.kind);
+    if (!g.has(conv)) g.set(conv, { conv, name: c.name, last: null });
   }
   const byRecent = (a, b) =>
     (b.last ? b.last.last_id : 0) - (a.last ? a.last.last_id : 0) || a.name.localeCompare(b.name);
-  return { chans, dms: [...dms.values()].sort(byRecent) };
+  const sorted = (m) => [...m.values()].sort(byRecent);
+  return { chans, direct: sorted(direct), rooms: sorted(rooms), others: sorted(others) };
 }
 
 function renderList() {
   const list = $("list");
   list.replaceChildren();
   const f = S.filter.toLowerCase();
-  const { chans, dms } = rows();
+  const { chans, direct, rooms, others } = rows();
   const add = (title, items) => {
     const shown = items.filter((r) => !f || r.name.toLowerCase().includes(f));
     if (!shown.length) return;
@@ -157,7 +170,9 @@ function renderList() {
     for (const r of shown) list.append(listItem(r));
   };
   add("Channels", chans);
-  add("Direct", dms);
+  add("Direct", direct);
+  add("Rooms", rooms);
+  add("Repeaters", others);
   if (!list.children.length) list.append(el("div", "section", f ? "No matches" : "Nothing yet"));
 }
 
@@ -185,7 +200,8 @@ function listItem(r) {
 function renderChatTitle() {
   $("chat-name").textContent = convName(S.open);
   const c = contactFor(S.open);
-  $("chat-sub").textContent = S.open.startsWith("ch:") ? "Channel" : c ? c.pubkey.slice(0, 12) : "Not in contacts";
+  const kind = c && c.kind === KIND_ROOM ? "Room, " : c && c.kind !== KIND_CHAT ? "Repeater, " : "";
+  $("chat-sub").textContent = S.open.startsWith("ch:") ? "Channel" : c ? kind + c.pubkey.slice(0, 12) : "Not in contacts";
 }
 
 async function openConv(conv) {
@@ -223,7 +239,11 @@ async function loadOlder() {
 function statusText(m) {
   switch (m.status) {
     case "sending": return "Sending";
-    case "sent": return m.kind === "channel" ? "Sent" : "Sent, waiting for ack";
+    case "sent":
+      if (m.kind !== "channel") return "Sent, waiting for ack";
+      if (m.heard === 1) return "Heard 1 repeat";
+      if (m.heard > 1) return "Heard " + m.heard + " repeats";
+      return "Sent";
     case "delivered": return "Delivered";
     case "unconfirmed": return "Not confirmed";
     case "failed": return "Failed";
@@ -247,13 +267,21 @@ function metaText(m) {
   return parts.join(", ");
 }
 
+function authorName(prefix) {
+  const c = S.contacts.find((x) => x.pubkey.startsWith(prefix));
+  return c ? c.name : prefix;
+}
+
 function msgNode(m, prev) {
   const isCh = m.conv.startsWith("ch:");
   const cont = prev && prev.direction === m.direction && prev.sender === m.sender &&
     m.received_at - prev.received_at < 300;
   const wrap = el("div", "msg " + m.direction + (cont ? " cont" : ""));
   wrap.dataset.id = m.id;
-  if (isCh && m.direction === "in" && !cont && m.sender) wrap.append(el("div", "who", m.sender));
+  // Channel senders by name; room posts carry the author's key prefix.
+  if (m.direction === "in" && !cont && m.sender) {
+    wrap.append(el("div", "who", isCh ? m.sender : authorName(m.sender)));
+  }
   let text = m.text;
   if (m.kind === "channel_data") text = "(data)";
   wrap.append(el("div", "bubble", text));
@@ -301,6 +329,14 @@ function onMessage(m) {
     if (document.visibilityState === "visible") markRead(m.conv, m.id);
   }
   refreshSoon();
+}
+
+function onHeard(id, heard) {
+  const m = S.msgs.find((x) => x.id === id);
+  if (!m) return;
+  m.heard = heard;
+  const node = $("messages").querySelector(`.msg[data-id="${id}"] .meta`);
+  if (node) node.textContent = metaText(m);
 }
 
 function onStatus(id, status) {
@@ -378,6 +414,7 @@ function connect() {
     switch (e.type) {
       case "message": onMessage(e.message); break;
       case "message_status": onStatus(e.id, e.status); break;
+      case "message_heard": onHeard(e.id, e.heard); break;
       case "drain_done": break;
       default: refreshSoon();
     }

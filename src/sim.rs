@@ -89,6 +89,8 @@ struct SimState {
     sent: Vec<(Vec<u8>, String)>,
     reboot_keeps_connection: bool,
     reboots: u32,
+    /// Last channel message sent: (index, timestamp, text on air).
+    last_channel_send: Option<(u8, u32, Vec<u8>)>,
 }
 
 #[derive(Clone)]
@@ -132,6 +134,7 @@ impl SimRadio {
             sent: Vec::new(),
             reboot_keeps_connection: false,
             reboots: 0,
+            last_channel_send: None,
         }));
         let changed = Arc::new(Notify::new());
         let task = tokio::spawn(accept_loop(listener, st.clone(), changed.clone()));
@@ -170,6 +173,28 @@ impl SimRadio {
         f.push(2); // path_len (flood, 2 hops)
         f.push(p::txt::PLAIN);
         f.extend_from_slice(&sender_ts.to_le_bytes());
+        f.extend_from_slice(text.as_bytes());
+        f.truncate(MAX_FRAME_SIZE);
+        queue_msg(&mut st, f);
+        drop(st);
+        self.changed.notify_waiters();
+    }
+
+    /// A room server forwards a post (MyMesh::onSignedMessageRecv): a signed
+    /// DM from the room, the author's 4 byte key prefix before the text.
+    pub fn receive_room_post(&self, room: &SimContact, author: &[u8; 4], ts: u32, text: &str) {
+        let mut st = self.st.lock().unwrap();
+        let mut f = Vec::new();
+        if st.app_ver >= 3 {
+            f.extend_from_slice(&[resp::CONTACT_MSG_RECV_V3, 12, 0, 0]);
+        } else {
+            f.push(resp::CONTACT_MSG_RECV);
+        }
+        f.extend_from_slice(&room.pubkey[..6]);
+        f.push(1);
+        f.push(p::txt::SIGNED_PLAIN);
+        f.extend_from_slice(&ts.to_le_bytes());
+        f.extend_from_slice(author);
         f.extend_from_slice(text.as_bytes());
         f.truncate(MAX_FRAME_SIZE);
         queue_msg(&mut st, f);
@@ -238,6 +263,31 @@ impl SimRadio {
 
     pub fn reboots(&self) -> u32 {
         self.st.lock().unwrap().reboots
+    }
+
+    /// The radio hears a repeater pass on our last channel message: a
+    /// `PUSH_CODE_LOG_RX_DATA` with the flooded packet, `path` being the
+    /// repeaters it went through.
+    pub fn echo_last_channel_send(&self, path: &[u8]) {
+        let st = self.st.lock().unwrap();
+        let Some((idx, ts, text)) = st.last_channel_send.clone() else {
+            return;
+        };
+        self.rx_group_text(&st, idx, ts, &text, path);
+    }
+
+    /// Someone else's channel message, as the RX log sees it.
+    pub fn hear_channel_packet(&self, idx: u8, ts: u32, text: &str, path: &[u8]) {
+        let st = self.st.lock().unwrap();
+        self.rx_group_text(&st, idx, ts, text.as_bytes(), path);
+    }
+
+    fn rx_group_text(&self, st: &SimState, idx: u8, ts: u32, text: &[u8], path: &[u8]) {
+        let key = crate::crypto::ChannelKey::new(idx, st.channels[idx as usize].1);
+        let raw = crate::crypto::group_text_packet(&key, ts, text, path);
+        let mut f = vec![push::LOG_RX_DATA, 24, (-80i8) as u8];
+        f.extend_from_slice(&raw);
+        send_out(st, f);
     }
 
     pub fn set_hold(&self, hold: bool) {
@@ -542,6 +592,10 @@ fn handle(st: &mut SimState, c: &[u8]) -> Vec<Vec<u8>> {
                 return e(err::UNSUPPORTED_CMD);
             }
             if (c[2] as usize) < st.channels.len() {
+                let mut on_air = format!("{}: ", st.name).into_bytes();
+                let room = p::MAX_TEXT_LEN - on_air.len();
+                on_air.extend_from_slice(&c[7..][..room.min(len - 7)]);
+                st.last_channel_send = Some((c[2], u32le(c, 3), on_air));
                 ok()
             } else {
                 e(err::NOT_FOUND)
